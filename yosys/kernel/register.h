@@ -17,11 +17,10 @@
  *
  */
 
+#include "kernel/yosys.h"
+
 #ifndef REGISTER_H
 #define REGISTER_H
-
-#include "kernel/yosys_common.h"
-#include "kernel/yosys.h"
 
 YOSYS_NAMESPACE_BEGIN
 
@@ -71,7 +70,6 @@ struct Pass
 
 	virtual void on_register();
 	virtual void on_shutdown();
-	virtual bool replace_existing_pass() const { return false; }
 };
 
 struct ScriptPass : Pass

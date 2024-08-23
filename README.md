@@ -1,3 +1,36 @@
+# ORCA Special Edition
+This version of VTR is modified by @xilai based on the official version `79a5bc8d163ce15aa195a84459f6350690e1fbf5`. I changed the default compiler, updated Python packages, and updated Yosys and Parmys to fit our purpose. This is tested on ORCA.
+
+## Setup
+1. Install build tools and Python packages. On July 22, 2023, I updated the build tools on ORCA, so if anyone needs to install them on ORCA, there's no need to do it again. (You still need to install python packages)
+
+```
+# some cmds to create a new python environment. I used conda, and it works well, and the official VTR project uses venv, so both should work.
+sudo ./install_apt_packages.sh
+pip install -U -r requirements.txt
+```
+
+2. Compile and verify functionality.
+```
+make CMAKE_PARAMS="-DWITH_PARMYS=ON -DYOSYS_F4PGA_PLUGINS=ON -DYOSYS_PARMYS_PLUGIN=ON"
+./vtr_flow/scripts/run_vtr_task.py regression_tests/vtr_reg_basic/basic_timing
+```
+
+The expected output is:
+```
+k6_N10_mem32K_40nm/single_ff            OK
+k6_N10_mem32K_40nm/single_ff            OK
+k6_N10_mem32K_40nm/single_wire          OK
+k6_N10_mem32K_40nm/single_wire          OK
+k6_N10_mem32K_40nm/diffeq1              OK
+k6_N10_mem32K_40nm/diffeq1              OK
+k6_N10_mem32K_40nm/ch_intrinsics                OK
+k6_N10_mem32K_40nm/ch_intrinsics                OK
+```
+
+## Special Notes
+- F4PGA is currently incompatible with the latest version of Yosys (see issue [here](https://github.com/chipsalliance/yosys-f4pga-plugins/issues/552)); manually downgraded to match the [previous fork](https://github.com/abdelfattah-lab/vtr-verilog-to-routing)'s version. Upgrade when the issue is fixed.
+
 # Verilog to Routing (VTR)
 [![Gitpod Ready-to-Code](https://img.shields.io/badge/Gitpod-Ready--to--Code-blue?logo=gitpod)](https://gitpod.io/#https://github.com/verilog-to-routing/vtr-verilog-to-routing.git)
 [![Build Status](https://github.com/verilog-to-routing/vtr-verilog-to-routing/workflows/Test/badge.svg)](https://github.com/verilog-to-routing/vtr-verilog-to-routing/actions?query=workflow%3ATest) [![Documentation Status](https://readthedocs.org/projects/vtr/badge/?version=latest)](http://docs.verilogtorouting.org/en/latest/)

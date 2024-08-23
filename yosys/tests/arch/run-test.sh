@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 set -e
 
@@ -16,7 +16,7 @@ for arch in ../../techlibs/*; do
 			done
 		else
 			echo -n "Test $path ->"
-			iverilog -t null -I$arch -g2005-sv $path
+			iverilog -t null -I$arch $path
 			echo " ok"
 		fi
 	done
