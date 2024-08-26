@@ -878,6 +878,8 @@ struct ParMYSPass : public Pass {
         global_args.exact_mults = -1;
         global_args.mults_ratio = -1.0;
 
+        set_default_config();
+
         log_header(design, "Starting parmys pass.\n");
 
         size_t argidx;
@@ -918,6 +920,10 @@ struct ParMYSPass : public Pass {
                 global_args.mults_ratio = atof(args[++argidx].c_str());
                 continue;
             }
+            if (args[argidx] == "-adder_cin_global") {
+                configuration.adder_cin_global = true;
+                continue;
+            }
         }
         extra_args(args, argidx, design);
 
@@ -935,7 +941,6 @@ struct ParMYSPass : public Pass {
         }
 
         mixer = new HardSoftLogicMixer();
-        set_default_config();
 
         if (global_args.mults_ratio >= 0.0 && global_args.mults_ratio <= 1.0) {
             delete mixer->_opts[MULTIPLY];

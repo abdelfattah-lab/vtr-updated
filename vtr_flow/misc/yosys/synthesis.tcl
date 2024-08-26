@@ -66,7 +66,7 @@ techmap -map +/parmys/aldffe2dff.v
 
 opt -full
 
-parmys -a QQQ -nopass -c CCC YYY
+parmys -a QQQ -nopass -c CCC ADDERCINGLOBAL
 
 opt -full
 

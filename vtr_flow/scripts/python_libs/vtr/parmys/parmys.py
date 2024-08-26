@@ -54,7 +54,8 @@ def init_script_file(
     architecture_file_path,
     odin_config_full_path,
     include_dir='.',
-    top_module='-auto-top'
+    top_module='-auto-top',
+    adder_cin_global=False
 ):
     """initializing the raw yosys script file"""
     # specify the input files type
@@ -74,6 +75,7 @@ def init_script_file(
             "QQQ": architecture_file_path,
             "SEARCHPATH": include_dir,
             "TOPMODULE": top_module,
+            "ADDERCINGLOBAL": "-adder_cin_global" if adder_cin_global else ""
         },
     )
 
@@ -227,6 +229,11 @@ def run(
             top_module = '-top ' + parmys_args['topmodule']
         del parmys_args['topmodule']
 
+    adder_cin_global = False
+    if ('adder_cin_global' in parmys_args):
+        adder_cin_global = parmys_args['adder_cin_global']
+        del parmys_args['adder_cin_global']
+    
     odin_base_config = str(vtr.paths.odin_cfg_path)
 
     # Copy the config file
@@ -251,7 +258,8 @@ def run(
         architecture_file_path,
         odin_config_full_path,
         include_dir=include_dir,
-        top_module=top_module
+        top_module=top_module,
+        adder_cin_global=adder_cin_global
     )
 
     # set the parser

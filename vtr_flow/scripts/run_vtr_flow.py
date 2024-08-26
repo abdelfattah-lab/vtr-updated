@@ -295,7 +295,7 @@ def vtr_command_argparser(prog=None):
         help="Tells ODIN II the adder type used in this configuration",
     )
     odin.add_argument(
-        "-adder_cin_global",
+        "-adder_cin_global_odin",
         default=False,
         action="store_true",
         dest="adder_cin_global",
@@ -383,6 +383,14 @@ def vtr_command_argparser(prog=None):
         default=os.getcwd(),
         dest='searchpath',
         help='search path for verilog files'
+    )
+    parmys.add_argument(
+        "-adder_cin_global",
+        default=False,
+        action="store_true",
+        dest="adder_cin_global",
+        help="Tells Parmys to connect the first cin in an adder/subtractor"
+        + "chain to a global gnd/vdd net.",
     )
     #
     # VPR arguments
@@ -748,6 +756,7 @@ def process_parmys_args(args):
     parmys_args["parser"] = args.parser
     parmys_args["topmodule"] = args.topmodule
     parmys_args['searchpath'] = args.searchpath
+    parmys_args["adder_cin_global"] = args.adder_cin_global
     return parmys_args
 
 
