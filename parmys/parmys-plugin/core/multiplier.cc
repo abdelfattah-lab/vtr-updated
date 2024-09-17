@@ -245,6 +245,434 @@ void instantiate_simple_soft_multiplier(nnode_t *node, short mark, netlist_t *ne
 
 /**
  * --------------------------------------------------------------------------
+ * (function: implement_constant_multiplication_minimized)
+ *
+ * @brief implementing constant multiplication by creating an adder tree with the least possible number of cascading adder chains.
+ *
+ * @note this function should called before partial mapping phase, in replacement of implement_constant_multipication
+ * since some logic need to be softened.
+ * Also will re-use adders when possible.
+ *
+ * @param node pointer to the multiplication netlist node
+ * @param port_status showing which value is constant, which is variable
+ * @param mark a unique DFS traversal number
+ * @param netlist pointer to the current netlist
+ *
+ * @return output signal
+ * -------------------------------------------------------------------------*/
+
+/* typedefs specific to this function */
+typedef struct adderNode_t {
+    char **hash;
+    int hashSize;
+    int adderSize;
+    npin_t **adder_out_pins;
+    nnet_t **adder_nets;
+    struct adderNode_t *next;
+} AdderNode;
+typedef struct shifted_net_list_t {
+    int shift;
+    int count;
+    npin_t **pin_list;
+    nnet_t **net_list;
+} ShiftedNetList;
+
+static signal_list_t *implement_constant_multiplication_minimized(nnode_t *node, mult_port_stat_e port_status, short mark, netlist_t *netlist)
+{
+    /* validate the port sizes */
+    oassert(node->num_input_port_sizes == 2);
+    oassert(node->num_output_port_sizes == 1);
+
+    /* temporary variables */
+    int i, j;
+    npin_t **pin_list;
+    nnet_t **net_list;
+
+    int IN1_width = node->input_port_sizes[0];
+
+    /* Determine required width, constant and variable offsets and widths */
+    // Required width
+    int req_width = node->num_output_pins;
+
+    // constant operand
+    int const_operand_offset = (port_status == mult_port_stat_e::MULTIPICAND_CONSTANT) ? IN1_width : 0;
+    int const_operand_width = node->input_port_sizes[(port_status == mult_port_stat_e::MULTIPICAND_CONSTANT) ? 1 : 0];
+    operation_list const_operand_signedness =
+      (port_status == mult_port_stat_e::MULTIPICAND_CONSTANT) ? node->attributes->port_b_signed : node->attributes->port_a_signed;
+    bool is_const_operand_signed = const_operand_signedness == SIGNED;
+
+    // variable operand
+    int variable_operand_offset = (port_status == mult_port_stat_e::MULTIPICAND_CONSTANT) ? 0 : IN1_width;
+    int variable_operand_width = node->num_input_pins - const_operand_width;
+    operation_list variable_operand_signedness =
+      (port_status == mult_port_stat_e::MULTIPICAND_CONSTANT) ? node->attributes->port_a_signed : node->attributes->port_b_signed;
+    bool is_variable_operand_signed = variable_operand_signedness == SIGNED;
+
+    // maximum width
+    int max_width = variable_operand_width + const_operand_width;
+
+    /* Make adjustments for signed operation */
+    if (is_const_operand_signed || is_variable_operand_signed) {
+        // assert that both operands must be signed!
+        oassert(is_const_operand_signed && is_variable_operand_signed);
+
+        // adjust maximum width.
+        max_width = req_width * 2;
+    }
+
+    /* netlist GND and VCC net */
+    nnet_t *gnd_net = netlist->zero_net;
+    nnet_t *vcc_net = netlist->one_net;
+
+    /* Create data structures to store:
+        - adder chains outs and hashes
+        - current rows of signals
+    */
+    int adderCount = 0;   
+    AdderNode *adderNodes = NULL;
+    int rowCount = 0;
+    ShiftedNetList rows[const_operand_width];
+    bool isRowEndingWithAdders[const_operand_width] = {false}; //mark true only if row ends with > 2 adders (used for signal equivalence)
+
+    /* Make initial rows using shifts of variable operand */
+    int const_lim = is_const_operand_signed ? req_width : const_operand_width;
+    int variable_lim = is_variable_operand_signed ? req_width : variable_operand_width;
+    for (i = 0; i < const_lim; i++) {
+        npin_t *const_pin = node->input_pins[const_operand_offset + (i >= const_operand_width ? const_operand_width - 1 : i)];
+        /* skip if connected to GND */
+        if (!strcmp(const_pin->net->name, gnd_net->name)) continue;
+
+        /* save row as variable operand */
+        rows[rowCount].shift = i;
+        rows[rowCount].count = variable_lim;
+
+        // make pins list and set nets to NULL
+        pin_list = (npin_t **) vtr::malloc(sizeof(npin_t *) * variable_lim);
+        for (j = 0; j < variable_lim; j++) {
+            pin_list[j] = copy_input_npin(node->input_pins[variable_operand_offset + (j >= variable_operand_width ? variable_operand_width - 1 : j)]);
+        }
+
+        rows[rowCount].pin_list = pin_list;
+        rows[rowCount].net_list = NULL;
+        rowCount++;
+    }
+
+    /* address const operand = 0; return all 0s */
+    if (!rowCount) {
+        // generate '0' list
+        signal_list_t *return_list = init_signal_list();
+        for (i = 0; i < req_width; i++) {
+            add_pin_to_signal_list(return_list, get_zero_pin(netlist));
+        }
+
+        // no resources to free; return list
+        return return_list;
+    }
+
+    /* collapse pairs of rows into single row by adding adder chains */
+    while (rowCount > 1) {
+        /* Count number of terms included in adder if constructed with each pair of consecutive rows */
+        int aCount_includeFirst = 0, aCount_excludeFirst = 0;
+        for (i = 0; i < rowCount - 1; i++) {
+            int aCount = rows[i].count + rows[i+1].count - rows[i+1].shift;
+            if (i % 2) aCount_excludeFirst += aCount;
+            else aCount_includeFirst += aCount;
+        }
+
+        // Start adder generation from first or second row, depending on which results in higher grouping count. 
+        bool shouldIncludeFirst = aCount_includeFirst >= aCount_excludeFirst;
+
+        /* Generate adder chains every two rows */
+        int startI = !shouldIncludeFirst;
+        int newRowCount = 0;
+
+        for (i = startI; i < rowCount; i += 2) {
+            if (rowCount - i == 1) {
+                // cannot generate adder with only one row; copy row into new position and break.
+                int rowI = (i - startI) / 2;
+                int rowCount = rows[i].count;
+
+                // copy row metrics
+                rows[rowI].count = rowCount;
+                rows[rowI].shift = rows[i].shift;
+
+                // copy pin and net list
+                npin_t **old_pin_list = rows[i].pin_list;
+                nnet_t **old_net_list = rows[i].net_list;
+
+                if (old_pin_list != NULL) {
+                    pin_list = (npin_t **) vtr::malloc(sizeof(npin_t*) * rowCount);
+                    for (j = 0; j < rowCount; j++) pin_list[j] = old_pin_list[j];
+                    rows[rowI].pin_list = pin_list;
+                    vtr::free(old_pin_list);
+                }
+                else {
+                    rows[rowI].pin_list = NULL;
+                }
+                if (old_net_list != NULL) {
+                    net_list = (nnet_t **) vtr::malloc(sizeof(nnet_t*) * rowCount);
+                    for (j = 0; j < rowCount; j++) net_list[j] = old_net_list[j];
+                    rows[rowI].net_list = net_list;
+                    vtr::free(old_net_list);
+                }
+                else {
+                    rows[rowI].net_list = NULL;
+                }
+
+                // copy old track value, and increment count.
+                isRowEndingWithAdders[rowI] = isRowEndingWithAdders[i];
+                newRowCount++;
+                break;
+            }
+
+            // calculate row metrics.
+            int count0 = rows[i].count, count1 = rows[i+1].count;
+            int shift0 = rows[i].shift, shift1 = rows[i+1].shift - shift0;
+            int used0 = count0 - shift1;
+            int hashSize = used0 + count1 + 1;
+
+            // Determine if last adder is to be skipped.
+            bool shouldSkipLast = count1 - used0 > 1 && isRowEndingWithAdders[i+1];
+            
+            // Determine adder input widths; remaining pins will be padded with zeros.
+            int maxInputWidth = std::max(used0, count1);
+
+            // Determine adder output width (and skip last adder if signal is equivalent).
+            int adderWidth = maxInputWidth + 1;
+            if (shouldSkipLast) {
+                // adjust widths if skipping last adder.
+                maxInputWidth--;
+                adderWidth -= 2;
+            }
+            if (adderWidth > max_width - shift0) adderWidth = max_width - shift0;
+
+            // create signal and pin list to use for this row.
+            int listSize = shift1 + adderWidth + shouldSkipLast;
+            pin_list = (npin_t **) vtr::malloc(sizeof(npin_t *) * listSize);
+            net_list = (nnet_t **) vtr::malloc(sizeof(nnet_t *) * listSize);
+
+            // get old pin and net lists of both rows.
+            npin_t **old_pin_list0 = rows[i].pin_list, **old_pin_list1 = rows[i+1].pin_list;
+            nnet_t **old_net_list0 = rows[i].net_list, **old_net_list1 = rows[i+1].net_list;
+
+            // add all pre-shift pins.
+            for (j = 0; j < shift1; j++) {
+                pin_list[j] = old_pin_list0 != NULL ? old_pin_list0[j] : NULL;
+                net_list[j] = old_net_list0 != NULL ? old_net_list0[j] : NULL;
+            }
+
+            // construct adder hash string.
+            char **hash = (char **) vtr::malloc(sizeof(char *) * hashSize);
+            for (j = shift1; j < count0; j++) {
+                hash[j-shift1] = old_net_list0 != NULL && old_net_list0[j] != NULL 
+                    ? old_net_list0[j]->name 
+                    : old_pin_list0[j]->name;
+            }
+            char plus[2] = "+";
+            hash[used0] = plus;
+            for (j = 0; j < count1; j++) {
+                hash[used0 + 1 + j] = old_net_list1 != NULL && old_net_list1[j] != NULL 
+                    ? old_net_list1[j]->name 
+                    : old_pin_list1[j]->name;
+            }
+
+            // Look for existing adder, if any.
+            AdderNode *cur = adderNodes, *prev = NULL;
+            while (cur != NULL) {
+                if (cur->hashSize == hashSize) {
+                    bool found = true;
+                    for (j = 0; j < hashSize; j++) {
+                        if (strcmp(cur->hash[j], hash[j]) != 0) {
+                            found = false;
+                            break;
+                        }
+                    }
+
+                    // all entire hash matches; i.e. adder is identical.
+                    if (found) break;
+                }
+
+                // else try the next adder node.
+                prev = cur;
+                cur = cur->next;
+            }
+            
+            if (cur == NULL) {
+                /* Make a new adder chain and add it to the saved adders. */
+                // make adder chain and add to global adder list.
+                nnode_t *add_node = make_2port_gate(ADD, maxInputWidth, maxInputWidth, adderWidth, node, mark);
+                add_list = insert_in_vptr_list(add_list, add_node);
+
+                // Make lists to store adder pin and nets.
+                int adderOutsSize = adderWidth;
+                if (shouldSkipLast) adderOutsSize++;
+                npin_t **adder_pins = (npin_t **) vtr::malloc(sizeof(npin_t *) * adderOutsSize);
+                nnet_t **adder_nets = (nnet_t **) vtr::malloc(sizeof(nnet_t *) * adderOutsSize);
+
+                // connect input pins, with zero pins as padding.
+                for (j = 0; j < maxInputWidth * 2; j++) {
+                    bool isFilling1 = j >= maxInputWidth;
+                    bool shouldPad = isFilling1 ? j - maxInputWidth >= count1 : j >= used0;
+                    npin_t *add_op_in;
+                    if (shouldPad) {
+                        // use '0' pin as input.
+                        add_op_in = get_zero_pin(netlist);
+                    }
+                    else {
+                        int idx = isFilling1 ? j - maxInputWidth : shift1 + j;
+                        nnet_t **row_net_list = isFilling1 ? old_net_list1 : old_net_list0;
+                        if (row_net_list != NULL && row_net_list[idx] != NULL) {
+                            // add input pin as fanout to current net (if it exists).
+                            add_op_in = allocate_npin();
+                            add_fanout_pin_to_net(row_net_list[idx], add_op_in);
+                        }
+                        else {
+                            // use previous pin.
+                            npin_t **row_pin_list = isFilling1 ? old_pin_list1 : old_pin_list0;
+                            add_op_in = row_pin_list[idx];
+                        }
+                    }
+                    
+                    // add input pin to adder node.
+                    add_input_pin_to_node(add_node, add_op_in, j);
+                }
+
+                // create new output pins, and use as adder list.
+                for (j = 0; j < adderWidth; j++) {
+                    // Connect output pin to related input pin
+                    npin_t *add_op_out1 = allocate_npin();
+                    npin_t *add_op_out2 = allocate_npin();
+                    nnet_t *add_op_net = allocate_nnet();
+
+                    /* hook the output pin into the node */
+                    add_output_pin_to_node(add_node, add_op_out1, j);
+                    /* hook up new pin 1 into the new net */
+                    add_driver_pin_to_net(add_op_net, add_op_out1);
+                    /* hook up the new pin 2 to this new net */
+                    add_fanout_pin_to_net(add_op_net, add_op_out2);
+
+                    // assign pin properties.
+                    char *addName = make_full_ref_name(NULL, NULL, NULL, add_node->name, j);
+                    add_op_out2->name = addName;
+
+                    // add to current row's pin and net list, and adder net list.
+                    add_op_net->name = addName;
+                    adder_pins[j] = add_op_out2;
+                    adder_nets[j] = add_op_net;
+                    pin_list[shift1+j] = add_op_out2;
+                    net_list[shift1+j] = add_op_net;
+                }
+
+                // skip last adder and tie output pin directly to last input pin.
+                if (shouldSkipLast) {
+                    npin_t *last_pin = old_pin_list1 != NULL ? old_pin_list1[count1-1] : NULL;
+                    nnet_t *last_net = old_net_list1 != NULL ? old_net_list1[count1-1] : NULL;
+                    adder_pins[adderWidth] = last_pin;
+                    adder_nets[adderWidth] = last_net;
+                    pin_list[shift1+adderWidth] = last_pin;
+                    net_list[shift1+adderWidth] = last_net;
+                }
+
+                // create new adder node and save.
+                AdderNode *adder_node = (AdderNode *) vtr::malloc(sizeof(AdderNode));
+                adder_node->adder_out_pins = adder_pins;
+                adder_node->adder_nets = adder_nets;
+                adder_node->hash = hash;
+                adder_node->hashSize = hashSize;
+                adder_node->adderSize = adderOutsSize;
+                adder_node->next = NULL;
+
+                if (adderNodes == NULL) adderNodes = adder_node;
+                else prev->next = adder_node;
+
+                adderCount++;
+            }
+            else {
+                /* Using existing adder chain. */
+                // free hash.
+                vtr::free(hash);
+
+                // Re-use found adder chain as row outputs.
+                for (j = 0; j < cur->adderSize; j++) {
+                    pin_list[shift1+j] = cur->adder_out_pins[j];
+                    net_list[shift1+j] = cur->adder_nets[j];
+                }
+            }
+
+            // collapse rows and save into first row.
+            if (old_pin_list0 != NULL) vtr::free(old_pin_list0);
+            if (old_net_list0 != NULL) vtr::free(old_net_list0);
+            if (old_pin_list1 != NULL) vtr::free(old_pin_list1);
+            if (old_net_list1 != NULL) vtr::free(old_net_list1);
+
+            int rowI = (i - startI) / 2;
+            rows[rowI].count = listSize;
+            rows[rowI].shift = shift0;
+            rows[rowI].pin_list = pin_list;
+            rows[rowI].net_list = net_list;
+
+            // mark row as adder, and increment count.
+            isRowEndingWithAdders[rowI] = !shouldSkipLast && adderWidth > 2;
+            newRowCount++;
+        }
+
+        // update row count.
+        rowCount = newRowCount;
+    }
+    /* get final signal list */
+    oassert(!rows[0].shift); //ensure that row is not shifted
+
+    // fill return list
+    signal_list_t *return_list = init_signal_list(); // get return list
+    int count = rows[0].count;
+    pin_list = rows[0].pin_list;
+    net_list = rows[0].net_list;
+
+    for (i = 0; i < req_width; i++) {
+        npin_t *pin;
+        int idx = i;
+        if (i >= count) {
+            // exceeded available pins; pad with '0' (since this only occurs in an unsigned context).
+            pin = get_zero_pin(netlist);
+        }
+        else if (net_list != NULL && net_list[i] != NULL) {
+            // connect to fanout
+            pin = allocate_npin();
+            add_fanout_pin_to_net(net_list[i], pin);
+
+        }
+        else {
+            // connect to original pin
+            pin = pin_list[i];
+        }
+
+        add_pin_to_signal_list(return_list, pin);
+    }
+
+    /* free resources */
+    //pin list
+    vtr::free(pin_list);
+    
+    //unused nets
+    if (net_list != NULL) {
+        vtr::free(net_list); 
+    }
+
+    //adder nodes
+    while (adderNodes != NULL) {
+        vtr::free(adderNodes->hash);
+        vtr::free(adderNodes->adder_out_pins);
+        vtr::free(adderNodes->adder_nets);
+        AdderNode *temp = adderNodes;
+        adderNodes = adderNodes->next;
+        vtr::free(temp);
+    }
+
+    return return_list;
+}
+
+/**
+ * --------------------------------------------------------------------------
  * (function: implement_constant_multipication)
  *
  * @brief implementing constant multipication utilizing shift and ADD operations
@@ -1345,8 +1773,8 @@ void iterate_multipliers(netlist_t *netlist)
             else {
                 record_mult_distribution(node);
             }
-        } else if (hard_adders) {
-            if (configuration.fixed_hard_multiplier != 0) {
+        } else if (hard_adders && configuration.fixed_hard_multiplier != 0) {
+            if (!check_constant_multipication(node, node->traverse_visited, netlist)) {
                 split_soft_multiplier(node, netlist);
             }
         }
@@ -1647,8 +2075,9 @@ bool check_constant_multipication(nnode_t *node, uintptr_t traverse_mark_number,
     if ((is_const = is_constant_multipication(node, netlist)) != mult_port_stat_e::NOT_CONSTANT) {
         /* performaing optimization on the constant multiplication ports */
         node = perform_const_mult_optimization(is_const, node, traverse_mark_number, netlist);
-        /* implementation of constant multipication which is actually cascading adders */
-        signal_list_t *output_signals = implement_constant_multipication(node, is_const, static_cast<short>(traverse_mark_number), netlist);
+        /* implementation of constant multiplication which is actually cascading adders */
+        // signal_list_t *output_signals = implement_constant_multipication(node, is_const, static_cast<short>(traverse_mark_number), netlist);
+        signal_list_t *output_signals = implement_constant_multiplication_minimized(node, is_const, static_cast<short>(traverse_mark_number), netlist);
 
         /* connecting the output pins */
         connect_constant_mult_outputs(node, output_signals);
