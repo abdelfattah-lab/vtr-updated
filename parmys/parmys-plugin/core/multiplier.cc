@@ -1024,18 +1024,19 @@ log("   %d + %d -> %d\n", a0, a1, new_rowI);
     /* Make output signal list. */
     signal_list_t *return_list = init_signal_list(); // get return list
     int size = rows[0].size;
+    int shift = rows[0].shift;
     npin_t **pins = rows[0].pins;
 
     for (i = 0; i < req_width; i++) {
         npin_t *pin;
         int idx = i;
-        if (i >= size) {
-            // exceeded available pins; pad with '0' (since this only occurs in an unsigned context).
+        if (i < shift || i >= size) {
+            // exceeded available pins, or shifted; pad with '0'.
             pin = get_zero_pin(netlist);
         }
         else {
             // connect to original pin
-            pin = pins[i];
+            pin = pins[i-shift];
         }
 
         add_pin_to_signal_list(return_list, pin);
