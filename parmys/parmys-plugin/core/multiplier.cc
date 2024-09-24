@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <string>
+#include <bits/stdc++.h>
 
 #include "adder.h"
 
@@ -247,7 +248,7 @@ void instantiate_simple_soft_multiplier(nnode_t *node, short mark, netlist_t *ne
  * --------------------------------------------------------------------------
  * (function: implement_constant_multiplication_minimized)
  *
- * @brief implementing constant multiplication by creating an adder tree with the least possible number of cascading adder chains.
+ * @brief implementing constant multiplication by creating an adder tree with the least possible number of cascading adder chains, using DP approach.
  *
  * @note this function should called before partial mapping phase, in replacement of implement_constant_multipication
  * since some logic need to be softened.
@@ -261,23 +262,475 @@ void instantiate_simple_soft_multiplier(nnode_t *node, short mark, netlist_t *ne
  * @return output signal
  * -------------------------------------------------------------------------*/
 
-/* typedefs specific to this function */
-typedef struct adderNode_t {
-    char **hash;
-    int hashSize;
-    int adderSize;
-    npin_t **adder_out_pins;
-    nnet_t **adder_nets;
-    struct adderNode_t *next;
-} AdderNode;
-typedef struct shifted_net_list_t {
-    int shift;
-    int count;
-    npin_t **pin_list;
-    nnet_t **net_list;
-} ShiftedNetList;
+/* Structure definitions. */
+// Adder instance (store input pins, predicted output size).
+typedef struct adderinst_struct {
+    // adder hash (for identification of identical adders).
+    char *hash;
+    // hash size.
+    int hash_size;
 
-static signal_list_t *implement_constant_multiplication_minimized(nnode_t *node, mult_port_stat_e port_status, short mark, netlist_t *netlist)
+    // terms included.
+    int terms_included;
+
+    // output nets.
+    nnet_t **nets;
+    // number of adders.
+    int out_size;
+
+    // saved as a linked list.
+    struct adderinst_struct *next;
+} adderinst_t;
+
+// Rows, with size and shift.
+typedef struct row_struct {
+    // pins used in this row.
+    npin_t **pins;
+    // total size.
+    int size;
+    // shift.
+    int shift;
+
+    // used for signal equivalence tracking.
+    bool endsWithAdders;
+} row_t;
+
+// Row reduction solution.
+typedef struct reducesol_struct {
+    int size;
+    // all used rows.
+    int *row_indices;
+    // pairs of rows used to add; has size (size - size % 2).
+    int *add_pairs;
+
+    /* solution metrics: */
+    // total number of adders used (after sharing).
+    int adder_count;
+    // total number of terms included.
+    int terms_included;
+
+    // for use as a linked list.
+    struct reducesol_struct *next;
+} reducesol_t;
+
+/* Sub-functions */
+
+// Check if two rows fulfill the condition for signal equivalence.
+bool hasSignalEquivalence(row_t *rows, int a0, int a1) {
+    int leftover = rows[a1].size - (rows[a0].size - (rows[a1].shift - rows[a0].shift));
+    return (rows[a1].endsWithAdders && leftover > 1) ||
+            (rows[a0].endsWithAdders && leftover < -1);
+}
+
+// Gets an adder hash from rows to add.
+char *getAdderHash(row_t *rows, int a0, int a1) {
+    // iteration variables.
+    int i;
+
+    // Get row information.
+    npin_t **pins0 = rows[a0].pins, **pins1 = rows[a1].pins;
+    int size0 = rows[a0].size, size1 = rows[a1].size;
+    int shift0 = rows[a0].shift, shift1 = rows[a1].shift;
+    int shiftDelta = shift1 - shift0;
+    int used0 = size0 - shiftDelta;
+    int used1 = size1;
+    if (hasSignalEquivalence(rows, a0, a1)) {
+        if (used0 > used1) used0--;
+        else used1--;
+    }
+
+    // generate hash.
+    std::stringstream hashStream;
+    // start lower row from shiftDelta.
+    for (i = shiftDelta; i < size0; i++) {
+        hashStream << pins0[i]->name;
+    }
+    // insert separator.
+    hashStream << "+";
+    // start upper row until used1.
+    for (i = 0; i < used1; i++) {
+        hashStream << pins1[i]->name;
+    }
+
+    // return c string.
+    return vtr::strdup(hashStream.str().c_str());
+}
+
+/* Searches an adderinst linked list and attempts to find an existing implementation of the adder, else add it to the list. */
+adderinst_t *addAdderInst(row_t *rows, int a0, int a1, adderinst_t **headPtr) {
+    // iteration variables.
+    int i;
+
+    // get adder hash and size.
+    char *hash = getAdderHash(rows, a0, a1);
+    int hashSize = strlen(hash);
+
+    // Check for existing.
+    adderinst_t *cur = *headPtr, *prev;
+    while (cur != NULL) {
+        if (cur->hash_size != hashSize) {
+            // size mismatch; continue.
+            prev = cur;
+            cur = cur->next;
+            continue;
+        }
+
+        if (!strcmp(cur->hash, hash)) {
+            // found a matching adder chain; break.
+            break;
+        }
+
+        // continue searching existing list.
+        prev = cur;
+        cur = cur->next;
+    }
+
+    if (cur == NULL) {
+        // Adder does not exist yet; make a new adderinst.
+        cur = (adderinst_t *) vtr::malloc(sizeof(adderinst_t));
+        cur->hash = hash;
+        cur->hash_size = hashSize;
+
+        // calculate adder size.
+        bool hasSignalEquiv = hasSignalEquivalence(rows, a0, a1);
+        int used0 = rows[a0].size - (rows[a1].shift - rows[a0].shift);
+        int used1 = rows[a1].size;
+        if (hasSignalEquiv) {
+            if (used0 > used1) used0--;
+            else used1--;
+        }
+        cur->terms_included = used0 + used1;
+        cur->out_size = (used0 > used1 ? used0 : used1) + !hasSignalEquiv;
+log("   [%d, %d]: used0: %d, used1: %d, hasSignalEquiv: %d -> out_size: %d\n", a0, a1, used0, used1, hasSignalEquiv, cur->out_size);
+
+        // do not make nets yet; this will be instantiated if actually used.
+        cur->nets = NULL;
+        cur->next = NULL;
+
+        // Assign to head, or last position.
+        if (*headPtr == NULL) *headPtr = cur;
+        else prev->next = cur;
+    }
+
+    // return the found/made adderinst.
+    return cur;
+}
+
+/* Get all possible adder chains for row pairs for a given number of rows, in a 2-D matrix.
+    - Since the last row will be covered in all previous rows, then we do not need a final row in the matrix.
+    - matrix size is (rowSize - 1) x (rowSize).
+    - returnHeadPtr will be set to the head of the linked list, for garbage collection.
+ */
+adderinst_t ***getAllAdderInst(row_t *rows, int rowSize, adderinst_t **returnHeadPtr) {
+    /* You must have at least 2 rows. */
+    if (rowSize <= 1) {
+        log_error("Invalid number of rows for getAllAdderInst: %d, expected >= 2\n", rowSize);
+    }
+
+    /* Make rows. */
+    // Iteration variables.
+    int i, j, k;
+log("Making adderinst matrix:\n");
+    // Make columns.
+    adderinst_t ***mat = (adderinst_t ***) vtr::malloc(sizeof(adderinst_t **) * (rowSize - 1));
+    for (i = 0; i < rowSize - 1; i++) {
+        // Make row.
+        adderinst_t **matRow = (adderinst_t **) vtr::malloc(sizeof(adderinst_t *) * rowSize);
+
+        // Fill NULLs.
+        for (j = 0; j <= i; j++) {
+            matRow[j] = NULL;
+        }
+
+        // Get adderinst for each pair of rows.
+        for (j = i + 1; j < rowSize; j++) {
+            // Assign adderinst to row pair indices.
+            matRow[j] = addAdderInst(rows, i, j, returnHeadPtr);
+        }
+
+        // Assign matrix row.
+        mat[i] = matRow;
+    }
+
+    // Return final matrix.
+    return mat;
+}
+
+// get hash from row indices.
+int getRowIndicesHash(int *row_indices, int size) {
+    int hash = 0;
+    for (int i = 0; i < size; i++) hash += row_indices[i];
+    return hash;
+}
+
+// free memo.
+void freeMemo(reducesol_t **memo, int size) {
+    reducesol_t *cur, *temp;
+    for (int i = 0; i < size; i++) {
+        cur = memo[i];
+        while (cur != NULL) {
+            temp = cur;
+            cur = cur->next;
+
+            // free solution.
+            vtr::free(temp->row_indices);
+            vtr::free(temp->add_pairs);
+            vtr::free(temp);
+        }
+    }
+
+    vtr::free(memo);
+}
+
+// insert a solution into the memo.
+void insertIntoMemo(reducesol_t **memo, reducesol_t *sol) {
+    // iteration variables.
+    int i;
+    
+    // get hash.
+    int hash = getRowIndicesHash(sol->row_indices, sol->size);
+
+    // insert into memo at hash position.
+    reducesol_t *cur = memo[hash];
+    if (cur == NULL) {
+        memo[hash] = cur;
+    }
+    else {
+        while (cur->next != NULL) cur = cur->next;
+        cur->next = sol;
+    }
+}
+
+// get a solution from the memo, if any.
+reducesol_t *getFromMemo(reducesol_t **memo, int *row_indices, int size) {
+    // iteration variables.
+    int i;
+
+    // get hash.
+    int hash = getRowIndicesHash(row_indices, size);
+
+    // Check if there are any memoized solutions for this set of row indices.
+    reducesol_t *cur = memo[hash];
+    while (cur != NULL) {
+        if (size != cur->size) {
+            // size mismatch; continue.
+            cur = cur->next;
+            continue;
+        }
+
+        bool matched = true;
+        for (i = 0; i < size; i++) {
+            if (row_indices[i] != cur->row_indices[i]) {
+                matched = false;
+                break;
+            }
+        }
+
+        if (matched) {
+            // found a match; return solution.
+            return cur;
+        }
+        
+        // ...else continue.
+        cur = cur->next;
+    }
+
+    // did not find anything; return NULL
+    return NULL;
+}
+
+// recursive top-down helper function.
+reducesol_t *getOptimalRowReductionHelper(reducesol_t **memo, adderinst_t ***adderinst_mat, row_t *rows, int rowSize, int *row_indices, int size) {
+    // attempt to get memoized solution.
+    reducesol_t *ret = getFromMemo(memo, row_indices, size);
+
+    if (ret != NULL) return ret;
+
+    // base case: size is 0, return NULL.
+    if (!size) return NULL;
+
+    // base case: size is 2, i.e., must add both rows together.
+    if (size == 2) {
+        ret = (reducesol_t *) vtr::malloc(sizeof(reducesol_t));
+        
+        // copy row indices and adder pairs.
+        ret->row_indices = (int *) vtr::malloc(sizeof(int) * size);
+        ret->add_pairs = (int *) vtr::malloc(sizeof(int) * size);
+        memcpy(ret->row_indices, row_indices, sizeof(int) * size);
+        memcpy(ret->add_pairs, row_indices, sizeof(int) * size);
+        ret->size = size;
+
+        // calculate metrics.
+        adderinst_t *adderinst = adderinst_mat[row_indices[0]][row_indices[1]];
+        ret->adder_count = adderinst->out_size;
+        ret->terms_included = adderinst->terms_included;
+
+        return ret;
+    }
+
+    // iteration variables.
+    int i, j, k, l;
+
+    // best solution finding variables.
+    reducesol_t *best = NULL, *cur;
+
+    // size is odd; exclude row by row, and get the best result.
+    if (size % 2) {
+        for (i = 0; i < size; i++) {
+            // copy sub-solution indices.
+            int *sub_indices = (int *) vtr::malloc(sizeof(int) * (size - 1));
+            k = 0;
+            for (j = 0; j < size; j++) {
+                if (j == i) {
+                    // skip index.
+                    continue;
+                }
+
+                sub_indices[k++] = row_indices[j];
+            }
+
+            // get solution.
+            cur = getOptimalRowReductionHelper(memo, adderinst_mat, rows, rowSize, sub_indices, size - 1);
+log("   exclude %d = ti: %d, ac: %d\n", i, cur->terms_included, cur->adder_count);
+            // compare with current best and save if better or equal (force exclusion downwards if possible).
+            if (best == NULL ||
+                cur->adder_count < best->adder_count ||
+                cur->adder_count == best->adder_count && cur->terms_included >= best->terms_included
+            ) {
+log("   => replace best\n");
+                best = cur;
+            }
+
+            // free sub-solution indices.
+            vtr::free(sub_indices);
+        }
+
+        // return best solution.
+        return best;
+    }
+
+    /* size is even; for every possible pair:
+        - add this pair together;
+        - get the best solution for the remaining rows;
+        - combine sub-solution with this pair added, and see if it beats the best solution.
+    */
+    int subSize = size - 2;
+    for (i = 0; i < size - 1; i++) {
+        for (j = i + 1; j < size; j++) {
+            // row_indices[i, j] will be the rows to add together.
+            int r0 = row_indices[i], r1 = row_indices[j];
+
+            // get adderinst for these two rows.
+            adderinst_t *adderinst = adderinst_mat[r0][r1];
+
+            // copy sub-indices.
+            int *sub_indices = (int *) vtr::malloc(sizeof(int) * subSize);
+            l = 0;
+            for (k = 0; k < size; k++) {
+                if (k == i || k == j) {
+                    // skip indices; continue.
+                    continue;
+                }
+
+                sub_indices[l++] = row_indices[k];
+            }
+
+            // get sub-solution.
+            cur = getOptimalRowReductionHelper(memo, adderinst_mat, rows, rowSize, sub_indices, subSize);
+
+            /* create a new solution, merged with current solution. */
+            // initial metrics, based on cur.
+            int termsIncluded = cur->terms_included;
+            int adderCount = cur->adder_count;
+
+            // see if adder chain already exists.
+            bool adderExists = false;
+            for (k = 0; k < subSize; k += 2) {
+                if (adderinst == adderinst_mat[cur->add_pairs[k]][cur->add_pairs[k+1]]) {
+                    // points to the same address; i.e., same adder.
+                    adderExists = true;
+                    break;
+                }
+            }
+
+            // add adder count if non-existent.
+            if (!adderExists) {
+                adderCount += adderinst->out_size;
+            }
+
+            // calculate terms included.
+            termsIncluded += adderinst->terms_included;
+
+            // make new solution if best is not yet existent.
+            if (best == NULL) {
+                best = (reducesol_t *) vtr::malloc(sizeof(reducesol_t));
+
+                // copy row indices.
+                best->row_indices = (int *) vtr::malloc(sizeof(int) * size);
+                memcpy(best->row_indices, row_indices, sizeof(int) * size);
+                
+                // add adder pairs.
+                int *add_pairs = (int *) vtr::malloc(sizeof(int) * size);
+                memcpy(add_pairs + 2, cur->add_pairs, sizeof(int) * cur->size);
+                add_pairs[0] = r0;
+                add_pairs[1] = r1;
+                best->add_pairs = add_pairs;
+
+                // include metrics.
+                best->terms_included = termsIncluded;
+                best->adder_count = adderCount;
+                best->size = size;
+
+            }
+            else if (
+                adderCount < best->adder_count ||
+                adderCount == best->adder_count && termsIncluded > best->terms_included
+            ) {
+                // copy new adder pairs.
+                memcpy(best->add_pairs + 2, cur->add_pairs, sizeof(int) * cur->size);
+                best->add_pairs[0] = r0;
+                best->add_pairs[1] = r1;
+
+                // update metrics.
+                best->adder_count = adderCount;
+                best->terms_included = termsIncluded;
+                
+            }
+        }
+    }
+
+    // return best solution.
+    return best;
+}
+
+// main wrapper function.
+reducesol_t *getOptimalRowReduction(reducesol_t **memo, adderinst_t ***adderinst_mat, row_t *rows, int rowSize) {
+    if (rowSize <= 1) {
+        // invalid row size (solving is not needed); return NULL.
+        return NULL;
+    }
+
+    // iteration variables.
+    int i;
+
+    // make initial row indices.
+    int *row_indices = (int *) vtr::malloc(sizeof(int) * rowSize);
+    for (i = 0; i < rowSize; i++) {
+        row_indices[i] = i;
+    }
+
+    // call helper function.
+    reducesol_t *best = getOptimalRowReductionHelper(memo, adderinst_mat, rows, rowSize, row_indices, rowSize);
+
+    // free row indices.
+    free(row_indices);
+
+    // return solution.
+    return best;
+}
+
+/* Main function. */
+static signal_list_t *implement_constant_multiplication_minimized_dp(nnode_t *node, mult_port_stat_e port_status, short mark, netlist_t *netlist)
 {
     /* validate the port sizes */
     oassert(node->num_input_port_sizes == 2);
@@ -324,350 +777,276 @@ static signal_list_t *implement_constant_multiplication_minimized(nnode_t *node,
     nnet_t *gnd_net = netlist->zero_net;
     nnet_t *vcc_net = netlist->one_net;
 
-    /* Create data structures to store:
-        - adder chains outs and hashes
-        - current rows of signals
-    */
-    int adderCount = 0;   
-    AdderNode *adderNodes = NULL;
-    int rowCount = 0;
-    ShiftedNetList rows[const_operand_width];
-    bool isRowEndingWithAdders[const_operand_width] = {false}; //mark true only if row ends with > 2 adders (used for signal equivalence)
+    /* Make initial rows. */
+    // variables.
+    row_t *rows = (row_t *) vtr::malloc(sizeof(row_t) * const_operand_width);
+    int rowSize = 0;
 
-    /* Make initial rows using shifts of variable operand */
+    // define index limits.
     int const_lim = is_const_operand_signed ? req_width : const_operand_width;
     int variable_lim = is_variable_operand_signed ? req_width : variable_operand_width;
+
     for (i = 0; i < const_lim; i++) {
         npin_t *const_pin = node->input_pins[const_operand_offset + (i >= const_operand_width ? const_operand_width - 1 : i)];
         /* skip if connected to GND */
-        if (!strcmp(const_pin->net->name, gnd_net->name)) continue;
-
+        if (!strcmp(const_pin->net->name, gnd_net->name)) {
+            continue;
+        }
         /* save row as variable operand */
-        rows[rowCount].shift = i;
-        rows[rowCount].count = variable_lim;
-
-        // make pins list and set nets to NULL
+        // make pins list.
         pin_list = (npin_t **) vtr::malloc(sizeof(npin_t *) * variable_lim);
         for (j = 0; j < variable_lim; j++) {
             pin_list[j] = copy_input_npin(node->input_pins[variable_operand_offset + (j >= variable_operand_width ? variable_operand_width - 1 : j)]);
         }
 
-        rows[rowCount].pin_list = pin_list;
-        rows[rowCount].net_list = NULL;
-        rowCount++;
+        // assign to row.
+        rows[rowSize++] = { pin_list, variable_lim, i, false };
     }
 
     /* address const operand = 0; return all 0s */
-    if (!rowCount) {
+    if (!rowSize) {
         // generate '0' list
         signal_list_t *return_list = init_signal_list();
         for (i = 0; i < req_width; i++) {
             add_pin_to_signal_list(return_list, get_zero_pin(netlist));
         }
 
-        // no resources to free; return list
+        // free rows
+        vtr::free(rows);
+
+        // return list
         return return_list;
     }
 
+    /* shrink rows to actual size (after ignoring constant '0's). */
+    rows = (row_t *) vtr::realloc(rows, sizeof(row_t) * rowSize);
+
     /* collapse pairs of rows into single row by adding adder chains */
-    while (rowCount > 1) {
-        /* Count number of terms included in adder if constructed with each pair of consecutive rows */
-        int aCount_includeFirst = 0, aCount_excludeFirst = 0;
-        for (i = 0; i < rowCount - 1; i++) {
-            int aCount = rows[i].count + rows[i+1].count - rows[i+1].shift;
-            if (i % 2) aCount_excludeFirst += aCount;
-            else aCount_includeFirst += aCount;
-        }
+    while (rowSize > 1) {
+log("current row size: %d\n", rowSize);
+        /* Get all possible adder chains. */
+        adderinst_t *head = NULL;
+        adderinst_t ***adderinst_mat = getAllAdderInst(rows, rowSize, &head);
 
-        // Start adder generation from first or second row, depending on which results in higher grouping count. 
-        bool shouldIncludeFirst = aCount_includeFirst >= aCount_excludeFirst;
+        /* Memoization cache. 
+            - sum used rows together to obtain a hash number.
+            - then search the linked list for the matching reducesol_t.
+            - total of n(n-1)/2 + 1 possible hashes (0-indexed).
+        */
+        int memoSize = rowSize * (rowSize - 1) / 2 + 1;
+        reducesol_t **memo = (reducesol_t **) vtr::malloc(sizeof(reducesol_t *) * memoSize);
+        for (i = 0; i < memoSize; i++) memo[i] = NULL;
 
-        /* Generate adder chains every two rows */
-        int startI = !shouldIncludeFirst;
-        int newRowCount = 0;
+        /* Use top-down DP solution to get optimal adder pairs. */
+        reducesol_t *best_sol = getOptimalRowReduction(memo, adderinst_mat, rows, rowSize);
 
-        for (i = startI; i < rowCount; i += 2) {
-            if (rowCount - i == 1) {
-                // cannot generate adder with only one row; copy row into new position and break.
-                int rowI = (i - startI) / 2;
-                int rowCount = rows[i].count;
+        /* Collapse adder pair rows. */
+        // make new rows.
+        int new_rowSize = (rowSize + rowSize % 2) / 2;
+        row_t *new_rows = (row_t *) malloc(sizeof(row_t) * new_rowSize);
+        int new_rowI = 0;
 
-                // copy row metrics
-                rows[rowI].count = rowCount;
-                rows[rowI].shift = rows[i].shift;
+        // adder variables.
+        int maxAdderCount = rowSize / 2;
+        adderinst_t *cur;
+        int localUniqueAdderCount = 0;
+        int *addPairs = best_sol->add_pairs;
+        int a0, a1;
 
-                // copy pin and net list
-                npin_t **old_pin_list = rows[i].pin_list;
-                nnet_t **old_net_list = rows[i].net_list;
+        // track the unused row (if any), and compile adder pairs into a vector for sorting.
+        std::vector<std::pair<int, int>> addPairsVect;
+        int unusedI = 0, lastAddPairFirst = 0;
+        bool shouldInsertUnused = rowSize % 2; // set to true if there will be an unused row (odd rows).
 
-                if (old_pin_list != NULL) {
-                    pin_list = (npin_t **) vtr::malloc(sizeof(npin_t*) * rowCount);
-                    for (j = 0; j < rowCount; j++) pin_list[j] = old_pin_list[j];
-                    rows[rowI].pin_list = pin_list;
-                    vtr::free(old_pin_list);
-                }
-                else {
-                    rows[rowI].pin_list = NULL;
-                }
-                if (old_net_list != NULL) {
-                    net_list = (nnet_t **) vtr::malloc(sizeof(nnet_t*) * rowCount);
-                    for (j = 0; j < rowCount; j++) net_list[j] = old_net_list[j];
-                    rows[rowI].net_list = net_list;
-                    vtr::free(old_net_list);
-                }
-                else {
-                    rows[rowI].net_list = NULL;
-                }
-
-                // copy old track value, and increment count.
-                isRowEndingWithAdders[rowI] = isRowEndingWithAdders[i];
-                newRowCount++;
-                break;
+        for (i = 0; i < rowSize - rowSize % 2; i++) {
+            int cur = addPairs[i];
+            unusedI += cur;
+            if (i % 2) {
+                addPairsVect.push_back(std::make_pair(lastAddPairFirst, cur));
             }
+            else {
+                lastAddPairFirst = cur;
+            }
+        }
+        unusedI = rowSize * (rowSize - 1) / 2 - unusedI;
+
+        // sort adder pairs in ascending order, by first row.
+        std::sort(addPairsVect.begin(), addPairsVect.end());
+
+        // work through each adder pair.
+        for (i = 0; i < maxAdderCount; i++) {
+            // get current adder pair indices.
+            a0 = addPairsVect[i].first;
+            a1 = addPairsVect[i].second;
+            cur = adderinst_mat[a0][a1];
 
             // calculate row metrics.
-            int count0 = rows[i].count, count1 = rows[i+1].count;
-            int shift0 = rows[i].shift, shift1 = rows[i+1].shift - shift0;
-            int used0 = count0 - shift1;
-            int hashSize = used0 + count1 + 1;
-
-            // Determine if last adder is to be skipped.
-            bool shouldSkipLast = count1 - used0 > 1 && isRowEndingWithAdders[i+1];
-            
-            // Determine adder input widths; remaining pins will be padded with zeros.
-            int maxInputWidth = std::max(used0, count1);
-
-            // Determine adder output width (and skip last adder if signal is equivalent).
-            int adderWidth = maxInputWidth + 1;
-            if (shouldSkipLast) {
-                // adjust widths if skipping last adder.
-                maxInputWidth--;
-                adderWidth -= 2;
+            bool hasSignalEquiv = hasSignalEquivalence(rows, a0, a1);
+            int shiftDelta = rows[a1].shift - rows[a0].shift;
+            int size0 = rows[a0].size, size1 = rows[a1].size;
+            int used0 = size0 - shiftDelta, used1 = size1;
+            if (hasSignalEquiv) {
+                if (used0 > used1) used0--;
+                else used1--;
             }
-            if (adderWidth > max_width - shift0) adderWidth = max_width - shift0;
+            int listSize = shiftDelta + cur->out_size + hasSignalEquiv;
 
-            // create signal and pin list to use for this row.
-            int listSize = shift1 + adderWidth + shouldSkipLast;
-            pin_list = (npin_t **) vtr::malloc(sizeof(npin_t *) * listSize);
-            net_list = (nnet_t **) vtr::malloc(sizeof(nnet_t *) * listSize);
-
-            // get old pin and net lists of both rows.
-            npin_t **old_pin_list0 = rows[i].pin_list, **old_pin_list1 = rows[i+1].pin_list;
-            nnet_t **old_net_list0 = rows[i].net_list, **old_net_list1 = rows[i+1].net_list;
-
-            // add all pre-shift pins.
-            for (j = 0; j < shift1; j++) {
-                pin_list[j] = old_pin_list0 != NULL ? old_pin_list0[j] : NULL;
-                net_list[j] = old_net_list0 != NULL ? old_net_list0[j] : NULL;
+            // if past unused row, then copy unused row first.
+            if (shouldInsertUnused && a0 > unusedI) {
+log("   unused %d -> %d\n", unusedI, new_rowI);
+                shouldInsertUnused = false;
+                new_rows[new_rowI++] = rows[unusedI];
             }
+log("   %d + %d -> %d\n", a0, a1, new_rowI);
+            /* Collapse row to adder chain (re-use if possible). */
+            // make new pin and net lists.
+            npin_t **new_pins = (npin_t **) vtr::malloc(sizeof(npin_t *) * listSize);
 
-            // construct adder hash string.
-            char **hash = (char **) vtr::malloc(sizeof(char *) * hashSize);
-            for (j = shift1; j < count0; j++) {
-                hash[j-shift1] = old_net_list0 != NULL && old_net_list0[j] != NULL 
-                    ? old_net_list0[j]->name 
-                    : old_pin_list0[j]->name;
+            // copy pins and nets unaffected by adder.
+            npin_t **old_pins0 = rows[a0].pins, **old_pins1 = rows[a1].pins;
+            for (j = 0; j < shiftDelta; j++) {
+                // copy pre-adder pins.
+                new_pins[j] = old_pins0[j];
             }
-            char plus[2] = "+";
-            hash[used0] = plus;
-            for (j = 0; j < count1; j++) {
-                hash[used0 + 1 + j] = old_net_list1 != NULL && old_net_list1[j] != NULL 
-                    ? old_net_list1[j]->name 
-                    : old_pin_list1[j]->name;
+            if (hasSignalEquiv) {
+                // copy last signal-equivalent pin.
+                new_pins[listSize-1] = used0 > size1
+                    ? old_pins0[size0-1]
+                    : old_pins1[size1-1];
             }
 
-            // Look for existing adder, if any.
-            AdderNode *cur = adderNodes, *prev = NULL;
-            while (cur != NULL) {
-                if (cur->hashSize == hashSize) {
-                    bool found = true;
-                    for (j = 0; j < hashSize; j++) {
-                        if (strcmp(cur->hash[j], hash[j]) != 0) {
-                            found = false;
-                            break;
-                        }
-                    }
+            // make adder if not yet instantiated.
+            nnet_t **adder_nets = cur->nets;
+            int outputWidth = cur->out_size;
+            if (adder_nets == NULL) {
+                // Determine adder input and output widths; remaining pins will be padded with zeros.
+                int maxInputWidth = used0 > used1 ? used0 : used1;
 
-                    // all entire hash matches; i.e. adder is identical.
-                    if (found) break;
-                }
-
-                // else try the next adder node.
-                prev = cur;
-                cur = cur->next;
-            }
-            
-            if (cur == NULL) {
-                /* Make a new adder chain and add it to the saved adders. */
                 // make adder chain and add to global adder list.
-                nnode_t *add_node = make_2port_gate(ADD, maxInputWidth, maxInputWidth, adderWidth, node, mark);
+                nnode_t *add_node = make_2port_gate(ADD, maxInputWidth, maxInputWidth, outputWidth, node, mark);
                 add_list = insert_in_vptr_list(add_list, add_node);
-
-                // Make lists to store adder pin and nets.
-                int adderOutsSize = adderWidth;
-                if (shouldSkipLast) adderOutsSize++;
-                npin_t **adder_pins = (npin_t **) vtr::malloc(sizeof(npin_t *) * adderOutsSize);
-                nnet_t **adder_nets = (nnet_t **) vtr::malloc(sizeof(nnet_t *) * adderOutsSize);
 
                 // connect input pins, with zero pins as padding.
                 for (j = 0; j < maxInputWidth * 2; j++) {
                     bool isFilling1 = j >= maxInputWidth;
-                    bool shouldPad = isFilling1 ? j - maxInputWidth >= count1 : j >= used0;
+                    bool shouldPad = isFilling1 ? j - maxInputWidth >= used1 : j >= used0;
                     npin_t *add_op_in;
                     if (shouldPad) {
                         // use '0' pin as input.
                         add_op_in = get_zero_pin(netlist);
                     }
                     else {
-                        int idx = isFilling1 ? j - maxInputWidth : shift1 + j;
-                        nnet_t **row_net_list = isFilling1 ? old_net_list1 : old_net_list0;
-                        if (row_net_list != NULL && row_net_list[idx] != NULL) {
-                            // add input pin as fanout to current net (if it exists).
-                            add_op_in = allocate_npin();
-                            add_fanout_pin_to_net(row_net_list[idx], add_op_in);
-                        }
-                        else {
-                            // use previous pin.
-                            npin_t **row_pin_list = isFilling1 ? old_pin_list1 : old_pin_list0;
-                            add_op_in = row_pin_list[idx];
-                        }
+                        int idx = isFilling1 ? j - maxInputWidth : shiftDelta + j;
+                        
+                        // use previous pin.
+                        npin_t **row_pin_list = isFilling1 ? old_pins1 : old_pins0;
+                        add_op_in = row_pin_list[idx];
                     }
                     
                     // add input pin to adder node.
                     add_input_pin_to_node(add_node, add_op_in, j);
                 }
 
-                // create new output pins, and use as adder list.
-                for (j = 0; j < adderWidth; j++) {
-                    // Connect output pin to related input pin
-                    npin_t *add_op_out1 = allocate_npin();
-                    npin_t *add_op_out2 = allocate_npin();
+                // create new output nets.
+                adder_nets = (nnet_t **) vtr::malloc(sizeof(nnet_t *) * outputWidth);
+
+                // create new output pins, and tie to nets.
+                for (j = 0; j < outputWidth; j++) {
+                    // Connect output pin to related input pin.
+                    npin_t *add_op_out = allocate_npin();
                     nnet_t *add_op_net = allocate_nnet();
 
-                    /* hook the output pin into the node */
-                    add_output_pin_to_node(add_node, add_op_out1, j);
-                    /* hook up new pin 1 into the new net */
-                    add_driver_pin_to_net(add_op_net, add_op_out1);
-                    /* hook up the new pin 2 to this new net */
-                    add_fanout_pin_to_net(add_op_net, add_op_out2);
+                    // hook the output pin into the adder node.
+                    add_output_pin_to_node(add_node, add_op_out, j);
+                    // Drive the new net with the output pin.
+                    add_driver_pin_to_net(add_op_net, add_op_out);
 
-                    // assign pin properties.
-                    char *addName = make_full_ref_name(NULL, NULL, NULL, add_node->name, j);
-                    add_op_out2->name = addName;
+                    // Make net name.
+                    add_op_net->name = make_full_ref_name(NULL, NULL, NULL, add_node->name, j);
 
-                    // add to current row's pin and net list, and adder net list.
-                    add_op_net->name = addName;
-                    adder_pins[j] = add_op_out2;
+                    // save adder net.
                     adder_nets[j] = add_op_net;
-                    pin_list[shift1+j] = add_op_out2;
-                    net_list[shift1+j] = add_op_net;
                 }
 
-                // skip last adder and tie output pin directly to last input pin.
-                if (shouldSkipLast) {
-                    npin_t *last_pin = old_pin_list1 != NULL ? old_pin_list1[count1-1] : NULL;
-                    nnet_t *last_net = old_net_list1 != NULL ? old_net_list1[count1-1] : NULL;
-                    adder_pins[adderWidth] = last_pin;
-                    adder_nets[adderWidth] = last_net;
-                    pin_list[shift1+adderWidth] = last_pin;
-                    net_list[shift1+adderWidth] = last_net;
-                }
-
-                // create new adder node and save.
-                AdderNode *adder_node = (AdderNode *) vtr::malloc(sizeof(AdderNode));
-                adder_node->adder_out_pins = adder_pins;
-                adder_node->adder_nets = adder_nets;
-                adder_node->hash = hash;
-                adder_node->hashSize = hashSize;
-                adder_node->adderSize = adderOutsSize;
-                adder_node->next = NULL;
-
-                if (adderNodes == NULL) adderNodes = adder_node;
-                else prev->next = adder_node;
-
-                adderCount++;
-            }
-            else {
-                /* Using existing adder chain. */
-                // free hash.
-                vtr::free(hash);
-
-                // Re-use found adder chain as row outputs.
-                for (j = 0; j < cur->adderSize; j++) {
-                    pin_list[shift1+j] = cur->adder_out_pins[j];
-                    net_list[shift1+j] = cur->adder_nets[j];
-                }
+                // save adder nets into adder instance.
+                cur->nets = adder_nets;
             }
 
-            // collapse rows and save into first row.
-            if (old_pin_list0 != NULL) vtr::free(old_pin_list0);
-            if (old_net_list0 != NULL) vtr::free(old_net_list0);
-            if (old_pin_list1 != NULL) vtr::free(old_pin_list1);
-            if (old_net_list1 != NULL) vtr::free(old_net_list1);
+            // make new pins and attach to nets.
+            for (j = 0; j < outputWidth; j++) {
+                npin_t *add_op_out = allocate_npin();
+                nnet_t *add_op_net = adder_nets[j];
+                add_fanout_pin_to_net(add_op_net, add_op_out);
+                add_op_out->name = add_op_net->name;
+                new_pins[shiftDelta + j] = add_op_out;
+            }
 
-            int rowI = (i - startI) / 2;
-            rows[rowI].count = listSize;
-            rows[rowI].shift = shift0;
-            rows[rowI].pin_list = pin_list;
-            rows[rowI].net_list = net_list;
+            // Make new row.
+            bool new_endsWithAdders = !hasSignalEquiv && outputWidth > 2;
+            new_rows[new_rowI++] = { new_pins, listSize, rows[a0].shift, new_endsWithAdders };
 
-            // mark row as adder, and increment count.
-            isRowEndingWithAdders[rowI] = !shouldSkipLast && adderWidth > 2;
-            newRowCount++;
+            // Free old pin lists.
+            vtr::free(rows[a0].pins);
+            vtr::free(rows[a1].pins);
         }
 
-        // update row count.
-        rowCount = newRowCount;
-    }
-    /* get final signal list */
-    oassert(!rows[0].shift); //ensure that row is not shifted
+        // if unused row is after the last adder pair, then copy unused row.
+        if (shouldInsertUnused) {
+            new_rows[new_rowI++] = rows[unusedI];
+        }
 
-    // fill return list
+        /* Free resources for this round. */
+        // old rows.
+        free(rows);
+
+        // adderinsts and matrix.
+        adderinst_t *temp;
+        while (head != NULL) {
+            temp = head;
+            head = head->next;
+            vtr::free(temp->nets);
+            vtr::free(temp);
+        }
+
+        for (i = 0; i < rowSize - 1; i++) {
+            vtr::free(adderinst_mat[i]);
+        }
+        vtr::free(adderinst_mat);
+
+        // memo.
+        freeMemo(memo, memoSize);
+
+        /* Update variables. */
+        rows = new_rows;
+        rowSize = new_rowSize;
+    }
+
+    /* Make output signal list. */
     signal_list_t *return_list = init_signal_list(); // get return list
-    int count = rows[0].count;
-    pin_list = rows[0].pin_list;
-    net_list = rows[0].net_list;
+    int size = rows[0].size;
+    npin_t **pins = rows[0].pins;
 
     for (i = 0; i < req_width; i++) {
         npin_t *pin;
         int idx = i;
-        if (i >= count) {
+        if (i >= size) {
             // exceeded available pins; pad with '0' (since this only occurs in an unsigned context).
             pin = get_zero_pin(netlist);
         }
-        else if (net_list != NULL && net_list[i] != NULL) {
-            // connect to fanout
-            pin = allocate_npin();
-            add_fanout_pin_to_net(net_list[i], pin);
-
-        }
         else {
             // connect to original pin
-            pin = pin_list[i];
+            pin = pins[i];
         }
 
         add_pin_to_signal_list(return_list, pin);
     }
 
-    /* free resources */
-    //pin list
-    vtr::free(pin_list);
-    
-    //unused nets
-    if (net_list != NULL) {
-        vtr::free(net_list); 
-    }
+    /* Free resources. */
+    // row.
+    vtr::free(pins);
+    vtr::free(rows);
 
-    //adder nodes
-    while (adderNodes != NULL) {
-        vtr::free(adderNodes->hash);
-        vtr::free(adderNodes->adder_out_pins);
-        vtr::free(adderNodes->adder_nets);
-        AdderNode *temp = adderNodes;
-        adderNodes = adderNodes->next;
-        vtr::free(temp);
-    }
-
+    /* Return final list. */
     return return_list;
 }
 
@@ -2077,7 +2456,7 @@ bool check_constant_multipication(nnode_t *node, uintptr_t traverse_mark_number,
         node = perform_const_mult_optimization(is_const, node, traverse_mark_number, netlist);
         /* implementation of constant multiplication which is actually cascading adders */
         // signal_list_t *output_signals = implement_constant_multipication(node, is_const, static_cast<short>(traverse_mark_number), netlist);
-        signal_list_t *output_signals = implement_constant_multiplication_minimized(node, is_const, static_cast<short>(traverse_mark_number), netlist);
+        signal_list_t *output_signals = implement_constant_multiplication_minimized_dp(node, is_const, static_cast<short>(traverse_mark_number), netlist);
 
         /* connecting the output pins */
         connect_constant_mult_outputs(node, output_signals);
