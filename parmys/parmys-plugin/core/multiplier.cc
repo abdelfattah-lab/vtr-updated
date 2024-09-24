@@ -401,7 +401,6 @@ adderinst_t *addAdderInst(row_t *rows, int a0, int a1, adderinst_t **headPtr) {
         }
         cur->terms_included = used0 + used1;
         cur->out_size = (used0 > used1 ? used0 : used1) + !hasSignalEquiv;
-log("   [%d, %d]: used0: %d, used1: %d, hasSignalEquiv: %d -> out_size: %d\n", a0, a1, used0, used1, hasSignalEquiv, cur->out_size);
 
         // do not make nets yet; this will be instantiated if actually used.
         cur->nets = NULL;
@@ -430,7 +429,7 @@ adderinst_t ***getAllAdderInst(row_t *rows, int rowSize, adderinst_t **returnHea
     /* Make rows. */
     // Iteration variables.
     int i, j, k;
-log("Making adderinst matrix:\n");
+
     // Make columns.
     adderinst_t ***mat = (adderinst_t ***) vtr::malloc(sizeof(adderinst_t **) * (rowSize - 1));
     for (i = 0; i < rowSize - 1; i++) {
@@ -591,13 +590,12 @@ reducesol_t *getOptimalRowReductionHelper(reducesol_t **memo, adderinst_t ***add
 
             // get solution.
             cur = getOptimalRowReductionHelper(memo, adderinst_mat, rows, rowSize, sub_indices, size - 1);
-log("   exclude %d = ti: %d, ac: %d\n", i, cur->terms_included, cur->adder_count);
+
             // compare with current best and save if better or equal (force exclusion downwards if possible).
             if (best == NULL ||
                 cur->adder_count < best->adder_count ||
                 cur->adder_count == best->adder_count && cur->terms_included >= best->terms_included
             ) {
-log("   => replace best\n");
                 best = cur;
             }
 
@@ -723,7 +721,7 @@ reducesol_t *getOptimalRowReduction(reducesol_t **memo, adderinst_t ***adderinst
     reducesol_t *best = getOptimalRowReductionHelper(memo, adderinst_mat, rows, rowSize, row_indices, rowSize);
 
     // free row indices.
-    free(row_indices);
+    vtr::free(row_indices);
 
     // return solution.
     return best;
@@ -823,7 +821,6 @@ static signal_list_t *implement_constant_multiplication_minimized_dp(nnode_t *no
 
     /* collapse pairs of rows into single row by adding adder chains */
     while (rowSize > 1) {
-log("current row size: %d\n", rowSize);
         /* Get all possible adder chains. */
         adderinst_t *head = NULL;
         adderinst_t ***adderinst_mat = getAllAdderInst(rows, rowSize, &head);
@@ -893,11 +890,10 @@ log("current row size: %d\n", rowSize);
 
             // if past unused row, then copy unused row first.
             if (shouldInsertUnused && a0 > unusedI) {
-log("   unused %d -> %d\n", unusedI, new_rowI);
                 shouldInsertUnused = false;
                 new_rows[new_rowI++] = rows[unusedI];
             }
-log("   %d + %d -> %d\n", a0, a1, new_rowI);
+
             /* Collapse row to adder chain (re-use if possible). */
             // make new pin and net lists.
             npin_t **new_pins = (npin_t **) vtr::malloc(sizeof(npin_t *) * listSize);
@@ -997,7 +993,7 @@ log("   %d + %d -> %d\n", a0, a1, new_rowI);
 
         /* Free resources for this round. */
         // old rows.
-        free(rows);
+        vtr::free(rows);
 
         // adderinsts and matrix.
         adderinst_t *temp;
