@@ -56,6 +56,7 @@ void split_multiplier_b(nnode_t *node, int a, int b1, int b0);
 void pad_multiplier(nnode_t *node, netlist_t *netlist);
 void split_soft_multiplier(nnode_t *node, netlist_t *netlist);
 static mult_port_stat_e is_constant_multipication(nnode_t *node, netlist_t *netlist);
+static signal_list_t *implement_constant_multiplication_minimized_dp(nnode_t *node, mult_port_stat_e port_status, short mark, netlist_t *netlist);
 static signal_list_t *implement_constant_multipication(nnode_t *node, mult_port_stat_e port_status, short mark, netlist_t *netlist);
 static nnode_t *perform_const_mult_optimization(mult_port_stat_e mult_port_stat, nnode_t *node, uintptr_t traverse_mark_number, netlist_t *netlist);
 static void cleanup_mult_old_node(nnode_t *nodeo, netlist_t *netlist);
