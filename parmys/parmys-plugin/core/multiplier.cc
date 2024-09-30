@@ -291,8 +291,8 @@ typedef struct row_struct {
     // shift.
     int shift;
 
-    // used for signal equivalence tracking.
-    bool endsWithAdders;
+    // used for tracking inability to propagate.
+    bool chanceToNotCarryPropagate;
 } row_t;
 
 // Row reduction solution.
@@ -315,11 +315,11 @@ typedef struct reducesol_struct {
 
 /* Sub-functions */
 
-// Check if two rows fulfill the condition for signal equivalence.
-bool hasSignalEquivalence(row_t *rows, int a0, int a1) {
+// Check if two rows fulfill the condition for inability to carry propagate.
+bool cannotCarryPropagate(row_t *rows, int a0, int a1) {
     int leftover = rows[a1].size - (rows[a0].size - (rows[a1].shift - rows[a0].shift));
-    return (rows[a1].endsWithAdders && leftover > 1) ||
-            (rows[a0].endsWithAdders && leftover < -1);
+    return (rows[a1].chanceToNotCarryPropagate && leftover > 0) ||
+            (rows[a0].chanceToNotCarryPropagate && leftover < 0);
 }
 
 // Gets an adder hash from rows to add.
@@ -334,10 +334,6 @@ char *getAdderHash(row_t *rows, int a0, int a1) {
     int shiftDelta = shift1 - shift0;
     int used0 = size0 - shiftDelta;
     int used1 = size1;
-    if (hasSignalEquivalence(rows, a0, a1)) {
-        if (used0 > used1) used0--;
-        else used1--;
-    }
 
     // generate hash.
     std::stringstream hashStream;
@@ -392,15 +388,11 @@ adderinst_t *addAdderInst(row_t *rows, int a0, int a1, adderinst_t **headPtr) {
         cur->hash_size = hashSize;
 
         // calculate adder size.
-        bool hasSignalEquiv = hasSignalEquivalence(rows, a0, a1);
         int used0 = rows[a0].size - (rows[a1].shift - rows[a0].shift);
         int used1 = rows[a1].size;
-        if (hasSignalEquiv) {
-            if (used0 > used1) used0--;
-            else used1--;
-        }
+        
         cur->terms_included = used0 + used1;
-        cur->out_size = (used0 > used1 ? used0 : used1) + !hasSignalEquiv;
+        cur->out_size = (used0 > used1 ? used0 : used1) + !cannotCarryPropagate(rows, a0, a1);
 
         // do not make nets yet; this will be instantiated if actually used.
         cur->nets = NULL;
@@ -538,6 +530,17 @@ reducesol_t *getFromMemo(reducesol_t **memo, int *row_indices, int size) {
     return NULL;
 }
 
+// get the strength (terms included / final adder count) of the solution.
+float getStrength(reducesol_t *sol) {
+    if (!sol->adder_count) return 0;
+    return ((float) sol->terms_included) / ((float) sol->adder_count);
+}
+
+// compare solutions and return true if best is to be updated.
+bool solBetterThanBest(reducesol_t *best, reducesol_t *cur) {
+    return best == NULL || (getStrength(cur) >= getStrength(best));
+}
+
 // recursive top-down helper function.
 reducesol_t *getOptimalRowReductionHelper(reducesol_t **memo, adderinst_t ***adderinst_mat, row_t *rows, int rowSize, int *row_indices, int size) {
     // attempt to get memoized solution.
@@ -592,10 +595,7 @@ reducesol_t *getOptimalRowReductionHelper(reducesol_t **memo, adderinst_t ***add
             cur = getOptimalRowReductionHelper(memo, adderinst_mat, rows, rowSize, sub_indices, size - 1);
 
             // compare with current best and save if better or equal (force exclusion downwards if possible).
-            if (best == NULL ||
-                cur->adder_count < best->adder_count ||
-                cur->adder_count == best->adder_count && cur->terms_included >= best->terms_included
-            ) {
+            if (solBetterThanBest(best, cur)) {
                 best = cur;
             }
 
@@ -680,10 +680,7 @@ reducesol_t *getOptimalRowReductionHelper(reducesol_t **memo, adderinst_t ***add
                 best->size = size;
 
             }
-            else if (
-                adderCount < best->adder_count ||
-                adderCount == best->adder_count && termsIncluded > best->terms_included
-            ) {
+            else if (solBetterThanBest(best, cur)) {
                 // copy new adder pairs.
                 memcpy(best->add_pairs + 2, cur->add_pairs, sizeof(int) * cur->size);
                 best->add_pairs[0] = r0;
@@ -878,15 +875,12 @@ static signal_list_t *implement_constant_multiplication_minimized_dp(nnode_t *no
             cur = adderinst_mat[a0][a1];
 
             // calculate row metrics.
-            bool hasSignalEquiv = hasSignalEquivalence(rows, a0, a1);
+            bool cannotProp = cannotCarryPropagate(rows, a0, a1);
             int shiftDelta = rows[a1].shift - rows[a0].shift;
             int size0 = rows[a0].size, size1 = rows[a1].size;
             int used0 = size0 - shiftDelta, used1 = size1;
-            if (hasSignalEquiv) {
-                if (used0 > used1) used0--;
-                else used1--;
-            }
-            int listSize = shiftDelta + cur->out_size + hasSignalEquiv;
+            
+            int listSize = shiftDelta + cur->out_size;
 
             // if past unused row, then copy unused row first.
             if (shouldInsertUnused && a0 > unusedI) {
@@ -903,12 +897,6 @@ static signal_list_t *implement_constant_multiplication_minimized_dp(nnode_t *no
             for (j = 0; j < shiftDelta; j++) {
                 // copy pre-adder pins.
                 new_pins[j] = old_pins0[j];
-            }
-            if (hasSignalEquiv) {
-                // copy last signal-equivalent pin.
-                new_pins[listSize-1] = used0 > size1
-                    ? old_pins0[size0-1]
-                    : old_pins1[size1-1];
             }
 
             // make adder if not yet instantiated.
@@ -978,8 +966,8 @@ static signal_list_t *implement_constant_multiplication_minimized_dp(nnode_t *no
             }
 
             // Make new row.
-            bool new_endsWithAdders = !hasSignalEquiv && outputWidth > 2;
-            new_rows[new_rowI++] = { new_pins, listSize, rows[a0].shift, new_endsWithAdders };
+            bool new_chanceToNotProp = !cannotProp && outputWidth > 2;
+            new_rows[new_rowI++] = { new_pins, listSize, rows[a0].shift, new_chanceToNotProp };
 
             // Free old pin lists.
             vtr::free(rows[a0].pins);
