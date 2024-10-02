@@ -147,13 +147,13 @@ YOSYS_VER := 0.32
 # tarballs generated with git-archive(1) using .gitattributes. The git repo
 # will have this file in its unexpanded form tough, in which case we fall
 # back to calling git directly.
-TARBALL_GIT_REV := $(shell cat $(YOSYS_SRC)/.gitcommit)
-ifeq ($(TARBALL_GIT_REV),$$Format:%h$$)
-GIT_REV := $(shell GIT_DIR=$(YOSYS_SRC)/.git git rev-parse --short=9 HEAD || echo UNKNOWN)
-else
-GIT_REV := $(TARBALL_GIT_REV)
-endif
-
+# TARBALL_GIT_REV := $(shell cat $(YOSYS_SRC)/.gitcommit)
+# ifeq ($(TARBALL_GIT_REV),$$Format:%h$$)
+# GIT_REV := $(shell GIT_DIR=$(YOSYS_SRC)/.git git rev-parse --short=9 HEAD || echo UNKNOWN)
+# else
+# GIT_REV := $(TARBALL_GIT_REV)
+# endif
+GIT_REV := UNKNOWN
 OBJS = kernel/version_$(GIT_REV).o
 
 bumpversion:
@@ -919,6 +919,8 @@ clean-unit-test:
 install: $(TARGETS) $(EXTRA_TARGETS)
 	$(INSTALL_SUDO) mkdir -p $(DESTDIR)$(BINDIR)
 	$(INSTALL_SUDO) cp $(filter-out libyosys.so,$(TARGETS)) $(DESTDIR)$(BINDIR)
+# only strip if not debugging
+ifneq ($(ENABLE_DEBUG),1)
 ifneq ($(filter $(PROGRAM_PREFIX)yosys,$(TARGETS)),)
 	$(INSTALL_SUDO) $(STRIP) -S $(DESTDIR)$(BINDIR)/$(PROGRAM_PREFIX)yosys
 endif
@@ -927,6 +929,7 @@ ifneq ($(filter $(PROGRAM_PREFIX)yosys-abc,$(TARGETS)),)
 endif
 ifneq ($(filter $(PROGRAM_PREFIX)yosys-filterlib,$(TARGETS)),)
 	$(INSTALL_SUDO) $(STRIP) $(DESTDIR)$(BINDIR)/$(PROGRAM_PREFIX)yosys-filterlib
+endif
 endif
 	$(INSTALL_SUDO) mkdir -p $(DESTDIR)$(DATDIR)
 	$(INSTALL_SUDO) cp -r share/. $(DESTDIR)$(DATDIR)/.
