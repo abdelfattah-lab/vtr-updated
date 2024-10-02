@@ -14,9 +14,12 @@ if(${CMAKE_GENERATOR} STREQUAL "Ninja")
     set(CURRENT_CPPFLAGS "-w")
 endif()
 
+set(ENABLE_DEBUG $<STREQUAL:$<UPPER_CASE:${CMAKE_BUILD_TYPE}>,DEBUG>)
+
 # how to build the result of the library
 add_custom_command(OUTPUT yosys-bin
         COMMAND ${MAKE_PROGRAM} ENABLE_ABC=0
+            ENABLE_DEBUG=${ENABLE_DEBUG}
 #            -C ${CMAKE_CURRENT_BINARY_DIR}
 #            -f ${CMAKE_CURRENT_SOURCE_DIR}/Makefile #(out-of-tree) build directory
             PREFIX=${CMAKE_BINARY_DIR}
@@ -24,6 +27,7 @@ add_custom_command(OUTPUT yosys-bin
             > /dev/null
 
         COMMAND ${MAKE_PROGRAM} install ENABLE_ABC=0
+            ENABLE_DEBUG=${ENABLE_DEBUG}
 #            -C ${CMAKE_CURRENT_BINARY_DIR}
 #            -f ${CMAKE_CURRENT_SOURCE_DIR}/Makefile #(out-of-tree) build directory
             PREFIX=${CMAKE_BINARY_DIR}
