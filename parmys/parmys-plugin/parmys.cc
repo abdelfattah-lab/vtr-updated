@@ -924,6 +924,10 @@ struct ParMYSPass : public Pass {
                 configuration.adder_cin_global = true;
                 continue;
             }
+            if (args[argidx] == "-soft_multiplier_adders") {
+                configuration.soft_multiplier_adders = true;
+                continue;
+            }
         }
         extra_args(args, argidx, design);
 

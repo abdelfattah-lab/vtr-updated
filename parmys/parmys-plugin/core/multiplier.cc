@@ -32,6 +32,7 @@
 #include <bits/stdc++.h>
 
 #include "adder.h"
+#include "compressor.h"
 
 #include "vtr_list.h"
 #include "vtr_memory.h"
@@ -57,6 +58,7 @@ void pad_multiplier(nnode_t *node, netlist_t *netlist);
 void split_soft_multiplier(nnode_t *node, netlist_t *netlist);
 static mult_port_stat_e is_constant_multipication(nnode_t *node, netlist_t *netlist);
 static signal_list_t *implement_constant_multiplication_minimized_dp(nnode_t *node, mult_port_stat_e port_status, short mark, netlist_t *netlist);
+static signal_list_t *implement_constant_multiplication_compressor_tree(nnode_t *node, mult_port_stat_e port_status, short mark, netlist_t *netlist);
 static signal_list_t *implement_constant_multipication(nnode_t *node, mult_port_stat_e port_status, short mark, netlist_t *netlist);
 static nnode_t *perform_const_mult_optimization(mult_port_stat_e mult_port_stat, nnode_t *node, uintptr_t traverse_mark_number, netlist_t *netlist);
 static void cleanup_mult_old_node(nnode_t *nodeo, netlist_t *netlist);
@@ -245,9 +247,21 @@ void instantiate_simple_soft_multiplier(nnode_t *node, short mark, netlist_t *ne
     }
 }
 
+/*---------------------------------------------------------------------------
+ * (function: instantiate_soft_multiplier_compressor_tree )
+ * 
+ * @brief implementing a soft multiplier via expanding boolean logic of a Wallace compressor tree, and then a final ripple adder chain for the last two rows.
+ * 
+ * @note 
+ * @param 
+ * -------------------------------------------------------------------------*/
+void instantiate_soft_multiplier_compressor_tree(nnode_t *node, short mark, netlist_t *netlist) {
+
+}
+
 /**
  * --------------------------------------------------------------------------
- * (function: implement_constant_multiplication_minimized)
+ * (function: implement_constant_multiplication_minimized_dp)
  *
  * @brief implementing constant multiplication by creating an adder tree with the least possible number of cascading adder chains, using DP approach.
  *
@@ -1034,6 +1048,120 @@ static signal_list_t *implement_constant_multiplication_minimized_dp(nnode_t *no
 
     /* Return final list. */
     return return_list;
+}
+
+/**
+ * --------------------------------------------------------------------------
+ * (function: implement_constant_multiplication_compressor_tree)
+ *
+ * @brief implementing constant multiplication by using a compressor tree.
+ *
+ * @note this function should called before partial mapping phase, in replacement of implement_constant_multipication
+ * since some logic need to be softened.
+ * Also will re-use adders when possible.
+ *
+ * @param node pointer to the multiplication netlist node
+ * @param port_status showing which value is constant, which is variable
+ * @param mark a unique DFS traversal number
+ * @param netlist pointer to the current netlist
+ *
+ * @return output signal
+ * -------------------------------------------------------------------------*/
+static signal_list_t *implement_constant_multiplication_compressor_tree(nnode_t *node, mult_port_stat_e port_status, short mark, netlist_t *netlist)
+{
+    /* validate the port sizes */
+    oassert(node->num_input_port_sizes == 2);
+    oassert(node->num_output_port_sizes == 1);
+
+    /* temporary variables */
+    int i, j;
+
+    int IN1_width = node->input_port_sizes[0];
+
+    /* Determine required width, constant and variable offsets and widths */
+    // Required width
+    int req_width = node->num_output_pins;
+
+    // constant operand
+    int const_operand_offset = (port_status == mult_port_stat_e::MULTIPICAND_CONSTANT) ? IN1_width : 0;
+    int const_operand_width = node->input_port_sizes[(port_status == mult_port_stat_e::MULTIPICAND_CONSTANT) ? 1 : 0];
+    operation_list const_operand_signedness =
+      (port_status == mult_port_stat_e::MULTIPICAND_CONSTANT) ? node->attributes->port_b_signed : node->attributes->port_a_signed;
+    bool is_const_operand_signed = const_operand_signedness == SIGNED;
+
+    // variable operand
+    int variable_operand_offset = (port_status == mult_port_stat_e::MULTIPICAND_CONSTANT) ? 0 : IN1_width;
+    int variable_operand_width = node->num_input_pins - const_operand_width;
+    operation_list variable_operand_signedness =
+      (port_status == mult_port_stat_e::MULTIPICAND_CONSTANT) ? node->attributes->port_a_signed : node->attributes->port_b_signed;
+    bool is_variable_operand_signed = variable_operand_signedness == SIGNED;
+
+    // maximum width
+    int max_width = variable_operand_width + const_operand_width;
+
+    /* Make adjustments for signed operation */
+    if (is_const_operand_signed || is_variable_operand_signed) {
+        // assert that both operands must be signed!
+        oassert(is_const_operand_signed && is_variable_operand_signed);
+
+        // adjust maximum width.
+        max_width = req_width * 2;
+    }
+
+    /* netlist GND and VCC net */
+    nnet_t *gnd_net = netlist->zero_net;
+    nnet_t *vcc_net = netlist->one_net;
+
+    /* Make initial ranks. */
+    // define index limits.
+    int const_lim = is_const_operand_signed ? req_width : const_operand_width;
+    int variable_lim = is_variable_operand_signed ? req_width : variable_operand_width;
+
+    // make ranks objects.
+    std::vector<std::vector<npin_t *>> ranks;
+    int ranks_size = 0;
+
+    // iterate over constant operand and add into ranks if '1'.
+    for (i = 0; i < const_lim; i++) {
+        npin_t *const_pin = node->input_pins[const_operand_offset + (i >= const_operand_width ? const_operand_width - 1 : i)];
+        /* skip if connected to GND */
+        if (!strcmp(const_pin->net->name, gnd_net->name)) {
+            continue;
+        }
+        /* save row as variable operand */
+        // add to appropriate ranks for this variable operand.
+        for (j = 0; j < variable_lim; j++) {
+            if (ranks_size < i + j + 1) {
+                // required rank does not exist yet; push a new one.
+                std::vector<npin_t *> rank;
+                ranks.push_back(rank);
+                ranks_size++;
+            }
+
+            // add pin to rank.
+            ranks[i+j].push_back(
+                copy_input_npin(
+                    node->input_pins[variable_operand_offset + (j >= variable_operand_width ? variable_operand_width - 1 : j)]
+                )
+            );
+        }
+    }
+
+    /* Use a Wallace tree to compress the result. */
+    signal_list_t *ret = implement_compressor_tree_wallace(node, mark, netlist, ranks);
+    int pin_count = ret->count;
+    if (pin_count < req_width) {
+        // less than required pins; pad with '0's.
+        for (i = pin_count; i < req_width; i++) {
+            add_pin_to_signal_list(ret, get_zero_pin(netlist));    
+        }
+    }
+    else if (pin_count > req_width) {
+        // more than required pins; simply alter count.
+        ret->count = req_width;
+    }
+
+    return ret;
 }
 
 /**
@@ -2440,9 +2568,17 @@ bool check_constant_multipication(nnode_t *node, uintptr_t traverse_mark_number,
     if ((is_const = is_constant_multipication(node, netlist)) != mult_port_stat_e::NOT_CONSTANT) {
         /* performaing optimization on the constant multiplication ports */
         node = perform_const_mult_optimization(is_const, node, traverse_mark_number, netlist);
-        /* implementation of constant multiplication which is actually cascading adders */
-        // signal_list_t *output_signals = implement_constant_multipication(node, is_const, static_cast<short>(traverse_mark_number), netlist);
-        signal_list_t *output_signals = implement_constant_multiplication_minimized_dp(node, is_const, static_cast<short>(traverse_mark_number), netlist);
+        /* implementation of constant multiplication */
+        signal_list_t *output_signals;
+        if (configuration.soft_multiplier_adders) {
+            // use cascading adder chains.
+            // signal_list_t *output_signals = implement_constant_multipication(node, is_const, static_cast<short>(traverse_mark_number), netlist);
+            output_signals = implement_constant_multiplication_minimized_dp(node, is_const, static_cast<short>(traverse_mark_number), netlist);
+        }
+        else {
+            // use a compressor tree.
+            output_signals = implement_constant_multiplication_compressor_tree(node, is_const, static_cast<short>(traverse_mark_number), netlist);
+        }
 
         /* connecting the output pins */
         connect_constant_mult_outputs(node, output_signals);

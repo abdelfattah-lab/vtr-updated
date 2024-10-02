@@ -38,6 +38,9 @@ struct config_t {
     int fixed_hard_multiplier;
     // Flag for splitting hard multipliers If fixed_hard_multiplier is set, this must be 1.
     int split_hard_multiplier;
+    // Set to True to use cascading adders to implement soft multiplication; else use compressor trees (default).
+    bool soft_multiplier_adders;
+
     // 1 to split memory width down to a size of 1. 0 to split to arch width.
     char split_memory_width;
     // Set to a positive integer to split memory depth to that address width. 0 to split to arch width.

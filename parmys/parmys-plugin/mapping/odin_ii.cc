@@ -55,6 +55,7 @@ void set_default_config()
 
     configuration.fixed_hard_multiplier = 0;
     configuration.split_hard_multiplier = 0;
+    configuration.soft_multiplier_adders = false;
 
     configuration.split_memory_width = 0;
     configuration.split_memory_depth = 0;
