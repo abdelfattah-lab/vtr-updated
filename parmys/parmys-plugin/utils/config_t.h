@@ -19,6 +19,8 @@
 #define _CONFIG_T_H_
 
 #include "odin_types.h"
+#include "compressor.h"
+
 #include <string>
 #include <vector>
 
@@ -40,6 +42,8 @@ struct config_t {
     int split_hard_multiplier;
     // Set to True to use cascading adders to implement soft multiplication; else use compressor trees (default).
     bool soft_multiplier_adders;
+    // Define the compressor tree type, if compressor trees are used. Default: Wallace
+    compressor_tree_type_e compressor_tree_type;
 
     // 1 to split memory width down to a size of 1. 0 to split to arch width.
     char split_memory_width;

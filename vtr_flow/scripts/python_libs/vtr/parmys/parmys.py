@@ -55,7 +55,9 @@ def init_script_file(
     odin_config_full_path,
     include_dir='.',
     top_module='-auto-top',
-    adder_cin_global=False
+    adder_cin_global=False,
+    soft_multiplier_adders=False,
+    compressor_tree_type='wallace'
 ):
     """initializing the raw yosys script file"""
     # specify the input files type
@@ -75,7 +77,9 @@ def init_script_file(
             "QQQ": architecture_file_path,
             "SEARCHPATH": include_dir,
             "TOPMODULE": top_module,
-            "ADDERCINGLOBAL": "-adder_cin_global" if adder_cin_global else ""
+            "ADDERCINGLOBAL": "-adder_cin_global" if adder_cin_global else "",
+            "SOFTMULTIPLIERADDERS": "-soft_multiplier_adders" if soft_multiplier_adders else "",
+            "COMPRESSORTREETYPE": compressor_tree_type
         },
     )
 
@@ -234,6 +238,16 @@ def run(
         adder_cin_global = parmys_args['adder_cin_global']
         del parmys_args['adder_cin_global']
     
+    soft_multiplier_adders = False
+    if ('soft_multiplier_adders' in parmys_args):
+        soft_multiplier_adders = parmys_args['soft_multiplier_adders']
+        del parmys_args['soft_multiplier_adders']
+    
+    compressor_tree_type = "wallace"
+    if ('compressor_tree_type' in parmys_args):
+        compressor_tree_type = parmys_args['compressor_tree_type']
+        del parmys_args['compressor_tree_type']
+    
     odin_base_config = str(vtr.paths.odin_cfg_path)
 
     # Copy the config file
@@ -259,7 +273,9 @@ def run(
         odin_config_full_path,
         include_dir=include_dir,
         top_module=top_module,
-        adder_cin_global=adder_cin_global
+        adder_cin_global=adder_cin_global,
+        soft_multiplier_adders=soft_multiplier_adders,
+        compressor_tree_type=compressor_tree_type
     )
 
     # set the parser

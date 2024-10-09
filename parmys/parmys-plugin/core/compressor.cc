@@ -11,6 +11,7 @@
 
 #include "adder.h"
 #include "vtr_list.h"
+#include "log.h"
 
 #include <vector>
 #include <tuple>
@@ -18,6 +19,7 @@
 using vtr::insert_in_vptr_list;
 
 // helper functions.
+static signal_list_t *ranks_to_adder_chain(nnode_t *node, short mark, netlist_t *netlist, std::vector<std::vector<npin_t *>> &ranks);
 static npin_t *make_output_pin(nnode_t *node, int idx);
 
 // implement basic gates.
@@ -26,6 +28,35 @@ static npin_t *implement_AND(nnode_t *node, short mark, npin_t *a, npin_t *b);
 // make full adder and half adder equivalent boolean gates.
 static std::pair<npin_t *, npin_t *> implement_FA(nnode_t *node, short mark, npin_t *a, npin_t *b, npin_t *c);
 static std::pair<npin_t *, npin_t *> implement_HA(nnode_t *node, short mark, npin_t *a, npin_t *b);
+
+// compressor tree implementations.
+static signal_list_t *implement_compressor_tree_wallace(nnode_t *node, short mark, netlist_t *netlist, std::vector<std::vector<npin_t *>> ranks);
+static signal_list_t *implement_compressor_tree_dadda(nnode_t *node, short mark, netlist_t *netlist, std::vector<std::vector<npin_t *>> ranks) ;
+
+/*-----------------------------------------------------------
+* (function: implement_compressor_tree)
+* 
+* @brief compresses a given multi-level addition, arranged by rank, into a single row of output pins.
+*
+* @note this uses a compressor tree approach as provided.
+*
+* @param ranks the i-th vector (0-indexed) contains the pins with weight 2^i.
+* @returns output signal list.
+* ---------------------------------------------------------*/
+signal_list_t *implement_compressor_tree(compressor_tree_type_e tree_type, nnode_t *node, short mark, netlist_t *netlist, std::vector<std::vector<npin_t *>> ranks)
+{
+    switch (tree_type) {
+        case compressor_tree_type_e::WALLACE:
+            // use Wallace tree.
+            return implement_compressor_tree_wallace(node, mark, netlist, ranks);
+        case compressor_tree_type_e::DADDA:
+            // use Dadda tree.
+            return implement_compressor_tree_dadda(node, mark, netlist, ranks);
+        default:
+            // invalid type; throw an error.
+            Yosys::log_error("Unrecognized compressor tree type. Please use one of the following in compressor_tree_type_e enum, defined under 'parmys-plugin/core/compressor.h'.");
+    }
+}
 
 /*-----------------------------------------------------------
 * (function: implement_compressor_tree_wallace)
@@ -37,14 +68,13 @@ static std::pair<npin_t *, npin_t *> implement_HA(nnode_t *node, short mark, npi
 * @param ranks the i-th vector (0-indexed) contains the pins with weight 2^i.
 * @returns output signal list.
 * ---------------------------------------------------------*/
-signal_list_t *implement_compressor_tree_wallace(nnode_t *node, short mark, netlist_t *netlist, std::vector<std::vector<npin_t *>> ranks) 
+static signal_list_t *implement_compressor_tree_wallace(nnode_t *node, short mark, netlist_t *netlist, std::vector<std::vector<npin_t *>> ranks) 
 {
     std::vector<std::vector<npin_t *>> temp;
     int i, rank_size, max_rank_size = 0, cur_ranks_size = ranks.size();
 
     // reduce ranks until only 2 rows remain.
     do {
-// printf("ranks size: %d, max_rank_size: %d\n", cur_ranks_size, max_rank_size);
         int new_ranks_size = 0; 
 
         // reduce current ranks.
@@ -137,14 +167,177 @@ signal_list_t *implement_compressor_tree_wallace(nnode_t *node, short mark, netl
         cur_ranks_size = ranks.size();
     } while (max_rank_size > 2);
 
+    // return final rows combined with adder chain.
+    return ranks_to_adder_chain(node, mark, netlist, ranks);
+}
+
+/*-----------------------------------------------------------
+* (function: implement_compressor_tree_dadda)
+* 
+* @brief compresses a given multi-level addition, arranged by rank, into a single row of output pins.
+*
+* @note this uses a Dadda tree approach.
+*
+* @param ranks the i-th vector (0-indexed) contains the pins with weight 2^i.
+* @returns output signal list.
+* ---------------------------------------------------------*/
+static signal_list_t *implement_compressor_tree_dadda(nnode_t *node, short mark, netlist_t *netlist, std::vector<std::vector<npin_t *>> ranks) {
+    std::vector<std::vector<npin_t *>> temp;
+    int i, rank_size, max_rank_size = 0, cur_ranks_size = ranks.size();
+
+    // get the maximum rank size.
+    for (i = 0; i < cur_ranks_size; i++) {
+        rank_size = ranks[i].size();
+        if (rank_size > max_rank_size) max_rank_size = rank_size;
+    }
+
+    // get all d-factors.
+    std::vector<int> d_factors;
+    int d = 2;
+    while (d < max_rank_size) {
+        d_factors.push_back(d);
+        d = d * 3 / 2;
+    }
+
+    if (!d_factors.empty()) {
+        // roll d back by one.
+        d = d_factors.back();
+        d_factors.pop_back();
+    }
+
+    /* reduce ranks according to Dadda's algorithm:
+        0. Define rank_size' as rank_size + last_carry_count + cur_adder_count.
+        1. if rank_size' <= d, then move to next rank.
+        2. if rank_size' = d+1, then combine 2 elements with HA, cur_adder_count += 1, then move to next rank.
+        3. else combine 3 elements with FA, cur_adder_count += 1, then repeat from 1.
+        4. assign last_carry_count = cur_adder_count.
+        5. repeat steps 1-4 until all ranks have <= 2 elements.
+    */
+    while (max_rank_size > 2) {
+        int new_ranks_size = 0;
+        
+        int last_carry_count = 0;
+        // reduce current ranks.
+        for (i = 0; i < cur_ranks_size; i++) {
+            int cur_adder_count = 0;
+            // get rank and size.
+            rank_size = ranks[i].size();
+
+            // make new row for this rank.
+            if (new_ranks_size < i + 1) {
+                std::vector<npin_t *> r0;
+                temp.push_back(r0);
+                new_ranks_size++;
+            }
+            if (rank_size + last_carry_count <= d) {
+                // skip if there is no need to reduce.
+                continue;
+            }
+            // make new row for generated carries.
+            if (new_ranks_size < i + 2) {
+                std::vector<npin_t *> r1;
+                temp.push_back(r1);
+                new_ranks_size++;
+            }
+
+            // make as many FAs as possible.
+            while (rank_size + last_carry_count + cur_adder_count > d+1 && rank_size >= 3) {
+                // make FA with last 3 pins.
+                npin_t *sum, *carry, *a, *b, *c;
+                a = ranks[i].back();
+                ranks[i].pop_back();
+                b = ranks[i].back();
+                ranks[i].pop_back();
+                c = ranks[i].back();
+                ranks[i].pop_back();
+                std::tie(sum, carry) = implement_FA(node, mark, a, b, c);
+
+                // add FA output pins to new ranks.
+                temp[i].push_back(sum);
+                temp[i+1].push_back(carry);
+
+                // reduce size.
+                rank_size -= 3;
+
+                // add to carry count.
+                cur_adder_count++;
+            }
+
+            // insert HA if rank_size = d+1.
+            if (rank_size + last_carry_count + cur_adder_count == d+1 && rank_size >= 2) {
+                // make FA with last 3 pins.
+                npin_t *sum, *carry, *a, *b;
+                a = ranks[i].back();
+                ranks[i].pop_back();
+                b = ranks[i].back();
+                ranks[i].pop_back();
+                std::tie(sum, carry) = implement_HA(node, mark, a, b);
+
+                // add FA output pins to new ranks.
+                temp[i].push_back(sum);
+                temp[i+1].push_back(carry);
+
+                // reduce size.
+                rank_size -= 2;
+                
+                // add to carry count.
+                cur_adder_count++;
+            }
+
+            // set carry count for next rank.
+            last_carry_count = cur_adder_count;
+        }
+
+        max_rank_size = 0;
+        // re-append all from temp.
+        for (i = 0; i < new_ranks_size; i++) {
+            std::vector<npin_t *> temp_rank = temp[i];
+            if (temp_rank.size()) {
+                // copy all elements over to corresponding rank, else add new rank.
+                if (i < cur_ranks_size) {
+                    ranks[i].insert(ranks[i].end(), temp_rank.begin(), temp_rank.end());
+                }
+                else {
+                    ranks.push_back(temp_rank);
+                }
+            }
+            
+            // check for max size.
+            rank_size = ranks[i].size();
+            if (rank_size > max_rank_size) {
+                max_rank_size = rank_size;
+            }
+        }
+
+        // clear temp vector.
+        temp.clear();
+        
+        // re-assign rank size.
+        cur_ranks_size = ranks.size();
+
+        // reduce d if possible.
+        while (!d_factors.empty()) {
+            d = d_factors.back();
+            d_factors.pop_back();
+            if (d < max_rank_size) break;
+        }
+    }
+
+    // return final rows combined with adder chain.
+    return ranks_to_adder_chain(node, mark, netlist, ranks);    
+}
+
+// converts ranks with height <= 2 to a final adder chain (if required).
+static signal_list_t *ranks_to_adder_chain(nnode_t *node, short mark, netlist_t *netlist, std::vector<std::vector<npin_t *>> &ranks) {
     // make output list and combine with adders if required.
     signal_list_t *ret = init_signal_list();
     nnode_t *add_node;
     bool makingAdderChain = false;
     int adder_start_i, adder_input_size;
 
-    for (i = 0; i < cur_ranks_size; i++) {
-        rank_size = ranks[i].size();
+    int cur_ranks_size = ranks.size();
+    for (int i = 0; i < cur_ranks_size; i++) {
+        int rank_size = ranks[i].size();
         
         // Make the adder chain if not yet instantiated.
         if (rank_size > 1 && !makingAdderChain) {

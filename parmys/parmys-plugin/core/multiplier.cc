@@ -1147,8 +1147,8 @@ static signal_list_t *implement_constant_multiplication_compressor_tree(nnode_t 
         }
     }
 
-    /* Use a Wallace tree to compress the result. */
-    signal_list_t *ret = implement_compressor_tree_wallace(node, mark, netlist, ranks);
+    /* Use a compressor tree to compress the result. */
+    signal_list_t *ret = implement_compressor_tree(configuration.compressor_tree_type, node, mark, netlist, ranks);
     int pin_count = ret->count;
     if (pin_count < req_width) {
         // less than required pins; pad with '0's.

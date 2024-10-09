@@ -66,7 +66,7 @@ techmap -map +/parmys/aldffe2dff.v
 
 opt -full
 
-parmys -a QQQ -nopass -c CCC ADDERCINGLOBAL
+parmys -a QQQ -nopass -c CCC ADDERCINGLOBAL SOFTMULTIPLIERADDERS -compressor_tree_type COMPRESSORTREETYPE
 
 opt -full
 

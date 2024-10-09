@@ -9,7 +9,12 @@
 
 #include "odin_types.h"
 
-// Wallace compressor tree implementation.
-extern signal_list_t *implement_compressor_tree_wallace(nnode_t *node, short mark, netlist_t *netlist, std::vector<std::vector<npin_t *>> ranks);
+enum class compressor_tree_type_e {
+    WALLACE, // Wallace tree
+    DADDA    // Dadda tree
+};
+
+// Implement the compressor tree according to the specified type.
+extern signal_list_t *implement_compressor_tree(compressor_tree_type_e tree_type, nnode_t *node, short mark, netlist_t *netlist, std::vector<std::vector<npin_t *>> ranks);
 
 #endif // _COMPRESSOR_H_

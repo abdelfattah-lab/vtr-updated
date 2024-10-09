@@ -25,6 +25,8 @@
 #include "hard_soft_logic_mixer.h"
 #include "vtr_path.h"
 
+#include "compressor.h"
+
 #define DEFAULT_OUTPUT "."
 
 loc_t my_location;
@@ -56,7 +58,8 @@ void set_default_config()
     configuration.fixed_hard_multiplier = 0;
     configuration.split_hard_multiplier = 0;
     configuration.soft_multiplier_adders = false;
-
+    configuration.compressor_tree_type = compressor_tree_type_e::WALLACE;
+    
     configuration.split_memory_width = 0;
     configuration.split_memory_depth = 0;
 

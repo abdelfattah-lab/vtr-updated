@@ -862,6 +862,15 @@ struct ParMYSPass : public Pass {
         log("    -viz\n");
         log("        visualizes the netlist at 3 different stages: elaborated, optimized, and mapped.\n");
         log("\n");
+        log("    -adder_cin_global\n");
+        log("        Tells Parmys to connect the first cin in an adder/subtractor chain to a global gnd/vdd net.\n");
+        log("\n");
+        log("    -soft_multiplier_adders\n");
+        log("        Tells Parmys to use cascading adder chains if present, else a compressor tree, to implement soft multiplication.\n");
+        log("\n");
+        log("    -compressor_tree_type string_value\n");
+        log("        Specify the compressor tree type to use ('wallace', 'dadda'). Default: 'wallace'\n");
+        log("\n");
     }
     void execute(std::vector<std::string> args, RTLIL::Design *design) override
     {
@@ -927,6 +936,18 @@ struct ParMYSPass : public Pass {
             if (args[argidx] == "-soft_multiplier_adders") {
                 configuration.soft_multiplier_adders = true;
                 continue;
+            }
+            if (args[argidx] == "-compressor_tree_type" && argidx + 1 < args.size()) {
+                std::string tree_type_str = args[++argidx];
+                if (tree_type_str == "wallace") {
+                    configuration.compressor_tree_type = compressor_tree_type_e::WALLACE;
+                }
+                else if (tree_type_str == "dadda") {
+                    configuration.compressor_tree_type = compressor_tree_type_e::DADDA;
+                }
+                else {
+                    log_error("Failed Parmys argument: Unrecognized tree type '%s' provided to -compressor_tree_type.\n", tree_type_str.c_str());
+                } 
             }
         }
         extra_args(args, argidx, design);

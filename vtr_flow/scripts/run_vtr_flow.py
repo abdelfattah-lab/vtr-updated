@@ -392,6 +392,19 @@ def vtr_command_argparser(prog=None):
         help="Tells Parmys to connect the first cin in an adder/subtractor"
         + "chain to a global gnd/vdd net.",
     )
+    parmys.add_argument(
+        "-soft_multiplier_adders",
+        default=False,
+        action="store_true",
+        dest="soft_multiplier_adders",
+        help="Tells Parmys to use cascading adder chains if True, else a compressor tree, to implement soft multiplication.",
+    )
+    parmys.add_argument(
+        "-compressor_tree_type",
+        default="wallace",
+        dest="compressor_tree_type",
+        help="Specify the compressor tree type to use ('wallace', 'dadda'). Default: 'wallace'",
+    )
     #
     # VPR arguments
     #
@@ -757,6 +770,8 @@ def process_parmys_args(args):
     parmys_args["topmodule"] = args.topmodule
     parmys_args['searchpath'] = args.searchpath
     parmys_args["adder_cin_global"] = args.adder_cin_global
+    parmys_args["soft_multiplier_adders"] = args.soft_multiplier_adders
+    parmys_args["compressor_tree_type"] = args.compressor_tree_type
     return parmys_args
 
 
