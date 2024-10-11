@@ -63,7 +63,7 @@ signal_list_t *implement_compressor_tree(compressor_tree_type_e tree_type, nnode
 * 
 * @brief compresses a given multi-level addition, arranged by rank, into a single row of output pins.
 *
-* @note this uses a Wallace tree approach.
+* @note this uses Asif & Kong's Proposed Wallace tree approach (https://doi.org/10.1155/2014/343960).
 *
 * @param ranks the i-th vector (0-indexed) contains the pins with weight 2^i.
 * @returns output signal list.
@@ -73,12 +73,24 @@ static signal_list_t *implement_compressor_tree_wallace(nnode_t *node, short mar
     std::vector<std::vector<npin_t *>> temp;
     int i, rank_size, max_rank_size = 0, cur_ranks_size = ranks.size();
 
+    // get the maximum rank size.
+    for (i = 0; i < cur_ranks_size; i++) {
+        rank_size = ranks[i].size();
+        if (rank_size > max_rank_size) max_rank_size = rank_size;
+    }
+
     // reduce ranks until only 2 rows remain.
-    do {
-        int new_ranks_size = 0; 
+    while (max_rank_size > 2) {
+        // initialize tracker variables for this scope.
+        int target_rank_size = (max_rank_size / 3) * 2 + (max_rank_size % 3);
+        bool is_first_reducible_rank = true;
+        int last_adder_count = 0;
+        int new_ranks_size = 0;
 
         // reduce current ranks.
         for (i = 0; i < cur_ranks_size; i++) {
+            int cur_adder_count = 0;
+
             // get rank and size.
             rank_size = ranks[i].size();
 
@@ -90,6 +102,7 @@ static signal_list_t *implement_compressor_tree_wallace(nnode_t *node, short mar
             }
             if (rank_size < 2) {
                 // skip if there is no need to reduce.
+                last_adder_count = 0;
                 continue;
             }
             // make new row for generated carries.
@@ -117,11 +130,20 @@ static signal_list_t *implement_compressor_tree_wallace(nnode_t *node, short mar
 
                 // reduce size.
                 rank_size -= 3;
+
+                // add to current adder count, and mark first rank flag as invalid.
+                cur_adder_count++;
+                is_first_reducible_rank = false;
             }
 
-            // make as many HAs as possible.
-            while (rank_size >= 2) {
-                // make FA with last 3 pins.
+            // insert HA only if (a) target rows need to be met, or (b) first rank with size >= 2.
+            if (rank_size == 2 // check for HA eligibility (if rank_size > 2, then an FA would have been inserted.)
+                && (
+                    is_first_reducible_rank // is first reducible rank.
+                    || cur_adder_count + last_adder_count + rank_size > target_rank_size // requires reduction to target size.
+                )
+            ) {
+                // make HA with last 2 pins.
                 npin_t *sum, *carry, *a, *b;
                 a = ranks[i].back();
                 ranks[i].pop_back();
@@ -129,13 +151,19 @@ static signal_list_t *implement_compressor_tree_wallace(nnode_t *node, short mar
                 ranks[i].pop_back();
                 std::tie(sum, carry) = implement_HA(node, mark, a, b);
 
-                // add FA output pins to new ranks.
+                // add HA output pins to new ranks.
                 temp[i].push_back(sum);
                 temp[i+1].push_back(carry);
 
                 // reduce size.
                 rank_size -= 2;
+
+                // add to current adder count, and mark first rank flag as invalid.
+                cur_adder_count++;
+                is_first_reducible_rank = false;
             }
+            // assign last_adder_count for next rank.
+            last_adder_count = cur_adder_count;
         }
 
 
@@ -152,6 +180,10 @@ static signal_list_t *implement_compressor_tree_wallace(nnode_t *node, short mar
                     ranks.push_back(temp_rank);
                 }
             }
+            else if (i >= cur_ranks_size) {
+                // rank will be invalid (carry vector created but no pins added.)
+                continue;
+            }
             
             // check for max size.
             rank_size = ranks[i].size();
@@ -165,7 +197,7 @@ static signal_list_t *implement_compressor_tree_wallace(nnode_t *node, short mar
         
         // re-assign rank size.
         cur_ranks_size = ranks.size();
-    } while (max_rank_size > 2);
+    }
 
     // return final rows combined with adder chain.
     return ranks_to_adder_chain(node, mark, netlist, ranks);
