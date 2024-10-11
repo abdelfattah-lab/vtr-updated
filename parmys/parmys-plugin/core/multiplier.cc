@@ -2267,7 +2267,9 @@ void iterate_multipliers(netlist_t *netlist)
                 record_mult_distribution(node);
             }
         } else if (hard_adders && configuration.fixed_hard_multiplier != 0) {
-            if (!check_constant_multipication(node, node->traverse_visited, netlist)) {
+            if (configuration.ignore_new_compressors // ignore new constant multiplication synthesis methods
+                || !check_constant_multipication(node, node->traverse_visited, netlist)
+                ) {
                 split_soft_multiplier(node, netlist);
             }
         }

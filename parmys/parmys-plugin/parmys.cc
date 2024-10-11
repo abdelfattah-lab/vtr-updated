@@ -945,6 +945,9 @@ struct ParMYSPass : public Pass {
                 else if (tree_type_str == "dadda") {
                     configuration.compressor_tree_type = compressor_tree_type_e::DADDA;
                 }
+                else if (tree_type_str == "old") {
+                    configuration.ignore_new_compressors = true;
+                }
                 else {
                     log_error("Failed Parmys argument: Unrecognized tree type '%s' provided to -compressor_tree_type.\n", tree_type_str.c_str());
                 } 

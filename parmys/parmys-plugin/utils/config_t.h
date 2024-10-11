@@ -40,6 +40,8 @@ struct config_t {
     int fixed_hard_multiplier;
     // Flag for splitting hard multipliers If fixed_hard_multiplier is set, this must be 1.
     int split_hard_multiplier;
+    // Flag to ignore all new implementations of multiplication, i.e., soft_multiplier_adders & compressor_tree_type.
+    bool ignore_new_compressors;
     // Set to True to use cascading adders to implement soft multiplication; else use compressor trees (default).
     bool soft_multiplier_adders;
     // Define the compressor tree type, if compressor trees are used. Default: Wallace
