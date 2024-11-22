@@ -391,20 +391,17 @@ vtr::vector<ParentNetId, std::vector<std::unordered_map<RRNodeId, int>>> set_net
                                                                                                                   std::vector<std::vector<int>>>& net_terminal_groups,
                                                                                                 const vtr::vector<ParentNetId,
                                                                                                                   std::vector<int>>& net_terminal_group_num,
-                                                                                                bool has_choking_spot,
+                                                                                                bool router_opt_choke_points,
                                                                                                 bool is_flat) {
     vtr::vector<ParentNetId, std::vector<std::unordered_map<RRNodeId, int>>> choking_spots(net_list.nets().size());
     for (const auto& net_id : net_list.nets()) {
         choking_spots[net_id].resize(net_list.net_pins(net_id).size());
     }
 
-    // Return if the architecture doesn't have any potential choke points
-    if (!has_choking_spot) {
+    // Return if the architecture doesn't have any potential choke points or flat router is not enabled
+    if (!router_opt_choke_points || !is_flat) {
         return choking_spots;
     }
-
-    // We only identify choke points if flat_routing is enabled.
-    VTR_ASSERT(is_flat);
 
     const auto& device_ctx = g_vpr_ctx.device();
     const auto& rr_graph = device_ctx.rr_graph;
@@ -472,8 +469,7 @@ void try_graph(int width_fac,
                t_det_routing_arch* det_routing_arch,
                std::vector<t_segment_inf>& segment_inf,
                t_chan_width_dist chan_width_dist,
-               t_direct_inf* directs,
-               int num_directs,
+               const std::vector<t_direct_inf>& directs,
                bool is_flat) {
     auto& device_ctx = g_vpr_ctx.mutable_device();
 
@@ -502,7 +498,7 @@ void try_graph(int width_fac,
                     det_routing_arch,
                     segment_inf,
                     router_opts,
-                    directs, num_directs,
+                    directs,
                     &warning_count,
                     is_flat);
 }
