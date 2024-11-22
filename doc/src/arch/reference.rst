@@ -158,6 +158,8 @@ The valid tags within the ``<layout>`` tag are:
 
     .. note:: At most one ``<auto_layout>`` can be specified.
 
+.. _fixed_arch_grid_layout:
+
 .. arch:tag:: <fixed_layout name="string" width="int" height="int">
 
     :req_param name:
@@ -2031,16 +2033,39 @@ The ``<segment>`` tag and its contents are described below.
 .. arch:tag:: <mux name="string"/>
 
     :req_param name: Name of the mux switch type used to drive this type of segment by default, from both block outputs and other wires. This information is used during rr-graph construction, and a custom switch block can override this switch type for specific connections if desired.
+                     The switch type specified with the <mux> tag will be used for both the incrementing and decrementing wires within this segment. 
+                     If more control is needed, the mux_inc and mux_dec tags can be used to assign different muxes to drive incremental and decremental wires within the segment.
 
     .. note:: For UNIDIRECTIONAL only.
 
     Tag must be included and ``name`` must be the same as the name you give in ``<switch type="mux" name="...``
+
+.. arch:tag:: <mux_inc name="string"/>
+
+    :req_param name: 
+        Name of the mux switch type used to drive the incremental wires in this segment from both block outputs and other wires.
+        Incremental wires are tracks within this segment that are heading in the "right" direction on the x-axis and the "top" direction on the y-axis.
+        This information is used during rr-graph construction, and a custom switch block can override this switch type for specific connections if desired.
+
+    .. note:: For UNIDIRECTIONAL only.
+
+.. arch:tag:: <mux_dec name="string">
+    
+    :req_param name: 
+        Name of the mux switch type used to drive the decremental wires in this segment from both block outputs and other wires.
+        Incremental wires are tracks within this segment that are heading in the "left" direction on the x-axis and the "bottom" direction on the y-axis.
+        This information is used during rr-graph construction, and a custom switch block can override this switch type for specific connections if desired.
+
+    .. note:: For UNIDIRECTIONAL only.
+
+    .. note:: For unidirectional segments, either <mux> tag or both <mux_inc> and <mux_dec> should be defined in the architecture file. If only the <mux> tag is defined, we assume that the same mux drives both incremental and decremental wires within this segment.     
 
 .. arch:tag:: <mux_inter_die name="string"/>
 
     :req_param name: Name of the mux switch type used to drive this segment type when the driver (block outputs and other wires) is located on a different die than the segment. This information is utilized during rr-graph construction.
 
     Tag must be included and ``name`` must be the same as the name you give in ``<switch type="mux" name="...``
+
 
 .. arch:tag:: <wire_switch name="string"/>
 
@@ -2312,8 +2337,8 @@ The ``<direct>`` tag and its contents are described below.
     :req_param y_offset: The y location of the receiving CLB relative to the driving CLB.
     :req_param z_offset: The z location of the receiving CLB relative to the driving CLB.
     :opt_param switch_name: [Optional, defaults to delay-less switch if not specified] The name of the ``<switch>`` from ``<switchlist>`` to be used for this direct connection.
-    :opt_param from_side: The associated from_pin's block size (must be one of ``left``, ``right``, ``top``, ``bottom`` or left unspecified)
-    :opt_param to_side: The associated to_pin's block size (must be one of ``left``, ``right``, ``top``, ``bottom`` or left unspecified)
+    :opt_param from_side: The associated from_pin's block side (must be one of ``left``, ``right``, ``top``, ``bottom`` or left unspecified)
+    :opt_param to_side: The associated to_pin's block side (must be one of ``left``, ``right``, ``top``, ``bottom`` or left unspecified)
 
     Describes a dedicated connection between two complex block pins that skips general interconnect.
     This is useful for describing structures such as carry chains as well as adjacent neighbour connections.

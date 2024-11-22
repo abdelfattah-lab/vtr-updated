@@ -3,18 +3,13 @@
  * @brief Stores the method definitions of classes defined in timing_place.h.
  */
 
-#include <cstdio>
 #include <cmath>
 
 #include "vtr_util.h"
-#include "vtr_memory.h"
-#include "vtr_log.h"
 
 #include "vpr_types.h"
 #include "vpr_utils.h"
-#include "globals.h"
 #include "net_delay.h"
-#include "timing_place_lookup.h"
 #include "timing_place.h"
 #include "placer_state.h"
 
@@ -68,7 +63,7 @@ void PlacerCriticalities::update_criticalities(const SetupTimingInfo* timing_inf
         ClusterNetId clb_net = clb_nlist_.pin_net(clb_pin);
         int pin_index_in_net = clb_nlist_.pin_net_index(clb_pin);
         // Routing for placement is not flat (at least for the time being)
-        float clb_pin_crit = calculate_clb_net_pin_criticality(*timing_info, pin_lookup_, ParentPinId(size_t(clb_pin)), false);
+        float clb_pin_crit = calculate_clb_net_pin_criticality(*timing_info, pin_lookup_, ParentPinId(size_t(clb_pin)), /*is_flat=*/false);
 
         float new_crit = pow(clb_pin_crit, crit_params.crit_exponent);
         /*
@@ -79,13 +74,15 @@ void PlacerCriticalities::update_criticalities(const SetupTimingInfo* timing_inf
          */
         if (!first_time_update_criticality) {
             if (new_crit > crit_params.crit_limit && timing_place_crit_[clb_net][pin_index_in_net] < crit_params.crit_limit) {
-                place_move_ctx.highly_crit_pins.push_back(std::make_pair(clb_net, pin_index_in_net));
+                place_move_ctx.highly_crit_pins.emplace_back(clb_net, pin_index_in_net);
             } else if (new_crit < crit_params.crit_limit && timing_place_crit_[clb_net][pin_index_in_net] > crit_params.crit_limit) {
-                place_move_ctx.highly_crit_pins.erase(std::remove(place_move_ctx.highly_crit_pins.begin(), place_move_ctx.highly_crit_pins.end(), std::make_pair(clb_net, pin_index_in_net)), place_move_ctx.highly_crit_pins.end());
+                place_move_ctx.highly_crit_pins.erase(std::remove(place_move_ctx.highly_crit_pins.begin(), place_move_ctx.highly_crit_pins.end(), std::make_pair(clb_net, pin_index_in_net)),
+                                                      place_move_ctx.highly_crit_pins.end());
             }
         } else {
-            if (new_crit > crit_params.crit_limit)
-                place_move_ctx.highly_crit_pins.push_back(std::make_pair(clb_net, pin_index_in_net));
+            if (new_crit > crit_params.crit_limit) {
+                place_move_ctx.highly_crit_pins.emplace_back(clb_net, pin_index_in_net);
+            }
         }
 
         /* The placer likes a great deal of contrast between criticalities.

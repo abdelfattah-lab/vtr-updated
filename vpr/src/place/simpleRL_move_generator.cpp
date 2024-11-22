@@ -1,11 +1,15 @@
+
 #include "simpleRL_move_generator.h"
+
 #include "globals.h"
+#include "vtr_random.h"
+#include "vtr_time.h"
+
 #include <algorithm>
 #include <numeric>
 #include <utility>
 
-#include "vtr_random.h"
-#include "vtr_time.h"
+
 /* File-scope routines */
 //a scaled and clipped exponential function
 static float scaled_clipped_exp(float x) { return std::exp(std::min(1000 * x, float(3.0))); }
@@ -33,9 +37,10 @@ void SimpleRLMoveGenerator::process_outcome(double reward, e_reward_function rew
  *  K-Armed bandit agent implementation   *
  *                                        *
  *                                        */
-KArmedBanditAgent::KArmedBanditAgent(std::vector<e_move_type> available_moves, e_agent_space agent_space)
+KArmedBanditAgent::KArmedBanditAgent(std::vector<e_move_type> available_moves, e_agent_space agent_space, vtr::RngContainer& rng)
     : available_moves_(std::move(available_moves))
-    , propose_blk_type_(agent_space == e_agent_space::MOVE_BLOCK_TYPE) {
+    , propose_blk_type_(agent_space == e_agent_space::MOVE_BLOCK_TYPE)
+    , rng_(rng) {
     std::vector<int> available_logical_block_types = get_available_logical_blk_types_();
     num_available_types_ = available_logical_block_types.size();
 
@@ -50,7 +55,7 @@ KArmedBanditAgent::KArmedBanditAgent(std::vector<e_move_type> available_moves, e
 }
 
 /*
- * If the agent selects both move type and block type, the would lool like this:
+ * If the agent selects both move type and block type, the action table would look like this:
  *
  *    +---------------+---------------+---------------+---------------+
  *    | (blk0, move0) | (blk0, move1) | ............. | (blk0, moveN) |
@@ -187,8 +192,8 @@ int KArmedBanditAgent::agent_to_phy_blk_type(const int idx) {
  *  E-greedy agent implementation   *
  *                                  *
  *                                  */
-EpsilonGreedyAgent::EpsilonGreedyAgent(std::vector<e_move_type> available_moves, e_agent_space agent_space, float epsilon)
-    : KArmedBanditAgent(std::move(available_moves), agent_space) {
+EpsilonGreedyAgent::EpsilonGreedyAgent(std::vector<e_move_type> available_moves, e_agent_space agent_space, float epsilon, vtr::RngContainer& rng)
+    : KArmedBanditAgent(std::move(available_moves), agent_space, rng) {
     set_epsilon(epsilon);
     init_q_scores_();
 }
@@ -213,10 +218,10 @@ void EpsilonGreedyAgent::init_q_scores_() {
 }
 
 t_propose_action EpsilonGreedyAgent::propose_action() {
-    if (vtr::frand() < epsilon_) {
+    if (rng_.frand() < epsilon_) {
         /* Explore
          * With probability epsilon, choose randomly amongst all move types */
-        float p = vtr::frand();
+        float p = rng_.frand();
         auto itr = std::lower_bound(cumm_epsilon_action_prob_.begin(), cumm_epsilon_action_prob_.end(), p);
         auto action_type_q_pos = itr - cumm_epsilon_action_prob_.begin();
         //Mark the q_table location that agent used to update its value after processing the move outcome
@@ -262,8 +267,8 @@ void EpsilonGreedyAgent::set_epsilon_action_prob() {
  *  Softmax agent implementation    *
  *                                  *
  *                                  */
-SoftmaxAgent::SoftmaxAgent(std::vector<e_move_type> available_moves, e_agent_space agent_space)
-    : KArmedBanditAgent(std::move(available_moves), agent_space) {
+SoftmaxAgent::SoftmaxAgent(std::vector<e_move_type> available_moves, e_agent_space agent_space, vtr::RngContainer& rng)
+    : KArmedBanditAgent(std::move(available_moves), agent_space, rng) {
     init_q_scores_();
 }
 
@@ -300,7 +305,7 @@ void SoftmaxAgent::init_q_scores_() {
 t_propose_action SoftmaxAgent::propose_action() {
     set_action_prob_();
 
-    float p = vtr::frand();
+    float p = rng_.frand();
     auto itr = std::lower_bound(cumm_action_prob_.begin(), cumm_action_prob_.end(), p);
     auto action_type_q_pos = itr - cumm_action_prob_.begin();
     //To take care that the last element in cumm_action_prob_ might be less than 1 by a small value
