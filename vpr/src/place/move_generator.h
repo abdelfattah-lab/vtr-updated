@@ -4,7 +4,6 @@
 #include "vpr_types.h"
 #include "move_utils.h"
 #include "timing_place.h"
-#include "directed_moves_util.h"
 
 #include <limits>
 
@@ -18,7 +17,7 @@ struct MoveOutcomeStats {
     float delta_bb_cost_abs = std::numeric_limits<float>::quiet_NaN();
     float delta_timing_cost_abs = std::numeric_limits<float>::quiet_NaN();
 
-    e_move_result outcome = ABORTED;
+    e_move_result outcome = e_move_result::ABORTED;
     float elapsed_time = std::numeric_limits<float>::quiet_NaN();
 };
 
@@ -34,20 +33,73 @@ struct MoveTypeStat {
     vtr::NdMatrix<int, 2> blk_type_moves;
     vtr::NdMatrix<int, 2> accepted_moves;
     vtr::NdMatrix<int, 2> rejected_moves;
+
+    /**
+     * @brief Prints placement perturbation distribution by block and move type.
+     */
+    void print_placement_move_types_stats() const;
+
+    inline void incr_blk_type_moves(const t_propose_action& proposed_action) {
+        if (proposed_action.logical_blk_type_index != -1) { //if the agent proposed the block type, then collect the block type stat
+            ++blk_type_moves[proposed_action.logical_blk_type_index][(int)proposed_action.move_type];
+        }
+    }
+
+    inline void incr_accept_reject(const t_propose_action& proposed_action,
+                                   e_move_result move_result) {
+        if (move_result == e_move_result::ACCEPTED) {
+            // if the agent proposed the block type, then collect the block type stat
+            if (proposed_action.logical_blk_type_index != -1) {
+                ++accepted_moves[proposed_action.logical_blk_type_index][(int)proposed_action.move_type];
+            }
+        } else {
+            VTR_ASSERT_SAFE(move_result == e_move_result::REJECTED);
+            if (proposed_action.logical_blk_type_index != -1) { //if the agent proposed the block type, then collect the block type stat
+                ++rejected_moves[proposed_action.logical_blk_type_index][(int)proposed_action.move_type];
+            }
+        }
+    }
 };
+
+/**
+ * @brief enum represents the different reward functions
+ */
+enum class e_reward_function {
+    BASIC,                      ///@ directly uses the change of the annealing cost function
+    NON_PENALIZING_BASIC,       ///@ same as basic reward function but with 0 reward if it's a hill-climbing one
+    RUNTIME_AWARE,              ///@ same as NON_PENALIZING_BASIC but with normalizing with the runtime factor of each move type
+    WL_BIASED_RUNTIME_AWARE,    ///@ same as RUNTIME_AWARE but more biased to WL cost (the factor of the bias is REWARD_BB_TIMING_RELATIVE_WEIGHT)
+    UNDEFINED_REWARD            ///@ Used for manual moves
+};
+
+e_reward_function string_to_reward(const std::string& st);
 
 /**
  * @brief a base class for move generators
  *
  * This class represents the base class for all move generators.
- * All its functions are virtual functions.
  */
 class MoveGenerator {
   public:
-    MoveGenerator(PlacerState& placer_state)
-        : placer_state_(placer_state) {}
+
+    /**
+     * @brief Initializes some protected member variables that are used
+     * by inheriting classes.
+     *
+     * @param placer_state A mutable reference to the placement state which will
+     * be stored in this object.
+     * @param reward_function Specifies the reward function to update q-tables
+     * of the RL agent.
+     * @param rng A random number generator to be used for block and location selection.
+     */
+    MoveGenerator(PlacerState& placer_state, e_reward_function reward_function, vtr::RngContainer& rng)
+        : placer_state_(placer_state)
+        , reward_func_(reward_function)
+        , rng_(rng) {}
 
     MoveGenerator() = delete;
+    MoveGenerator(const MoveGenerator&) = delete;
+    MoveGenerator& operator=(const MoveGenerator&) = delete;
     virtual ~MoveGenerator() = default;
 
     /**
@@ -81,8 +133,23 @@ class MoveGenerator {
      */
     virtual void process_outcome(double /*reward*/, e_reward_function /*reward_fun*/) {}
 
+    /**
+     * @brief Calculates the agent's reward and the total process outcome
+     *
+     * @param move_outcome_stats Contains information about how much each cost term
+     * changes by this move and whether the move is accepted.
+     * @param delta_c The total change in cost by this move.
+     * @param timing_bb_factor This factor controls the weight of bb cost
+     *  compared to the timing cost in the agent's reward function.
+     */
+    void calculate_reward_and_process_outcome(const MoveOutcomeStats& move_outcome_stats,
+                                              double delta_c,
+                                              float timing_bb_factor);
+
   protected:
     std::reference_wrapper<PlacerState> placer_state_;
+    e_reward_function reward_func_;
+    vtr::RngContainer& rng_;
 };
 
 #endif
