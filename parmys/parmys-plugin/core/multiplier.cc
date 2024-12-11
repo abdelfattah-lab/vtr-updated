@@ -335,7 +335,7 @@ typedef struct reducesol_struct {
 bool cannotCarryPropagate(row_t *rows, int a0, int a1) {
     int leftover = rows[a1].size - (rows[a0].size - (rows[a1].shift - rows[a0].shift));
     return (rows[a1].chanceToNotCarryPropagate && leftover > 1) ||
-            (rows[a0].chanceToNotCarryPropagate && leftover < 1);
+            (rows[a0].chanceToNotCarryPropagate && leftover < -1);
 }
 
 // Gets an adder hash from rows to add.
