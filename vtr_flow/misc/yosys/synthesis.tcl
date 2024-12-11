@@ -81,5 +81,5 @@ opt -fast -noff
 stat
 
 hierarchy -check TOPMODULE -purge_lib
-
+write_verilog design_post_yosys.v
 write_blif -true + vcc -false + gnd -undef + unconn -blackbox ZZZ
