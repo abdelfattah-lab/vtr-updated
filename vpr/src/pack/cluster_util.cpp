@@ -1,5 +1,7 @@
 #include "cluster_util.h"
+
 #include <algorithm>
+#include <cstring>
 #include <unordered_set>
 
 #include "PreClusterTimingGraphResolver.h"
@@ -1413,6 +1415,69 @@ size_t update_pb_type_count(const t_pb* pb, std::map<t_pb_type*, int>& pb_type_c
     return max_depth;
 }
 
+static void count_arithmetic_modes_recurr(const t_pb* pb,
+                                          int& num_arith_1chain,
+                                          int& num_arith_2chains) {
+    if (pb == nullptr || pb->pb_graph_node == nullptr) {
+        return;
+    }
+
+    t_pb_graph_node* pb_graph_node = pb->pb_graph_node;
+    t_pb_type* pb_type = pb_graph_node->pb_type;
+
+    if (pb_type && pb_type->num_modes > 0 && pb->mode >= 0 && pb->mode < pb_type->num_modes) {
+        t_mode* mode = &pb_type->modes[pb->mode];
+
+        // For Stratix-10 style architectures, the 'ble5' pb_type has modes
+        // 'arithmetic_1chain' and 'arithmetic_2chains'. We track how many
+        // instances of each mode are used.
+        if (std::strcmp(pb_type->name, "ble5") == 0) {
+            if (std::strcmp(mode->name, "arithmetic_1chain") == 0) {
+                num_arith_1chain++;
+            } else if (std::strcmp(mode->name, "arithmetic_2chains") == 0) {
+                num_arith_2chains++;
+            }
+        }
+
+        // Recurse on children following the selected mode
+        for (int ichild_type = 0; ichild_type < mode->num_pb_type_children; ++ichild_type) {
+            if (!pb->child_pbs[ichild_type]) continue;
+
+            t_pb_type* child_type = &mode->pb_type_children[ichild_type];
+            for (int ichild = 0; ichild < child_type->num_pb; ++ichild) {
+                if (pb->child_pbs[ichild_type][ichild].name) {
+                    count_arithmetic_modes_recurr(&pb->child_pbs[ichild_type][ichild],
+                                                  num_arith_1chain,
+                                                  num_arith_2chains);
+                }
+            }
+        }
+    }
+}
+
+void print_arithmetic_mode_usage(const ClusteredNetlist& clb_nlist) {
+    int num_arith_1chain = 0;
+    int num_arith_2chains = 0;
+
+    for (ClusterBlockId blk : clb_nlist.blocks()) {
+        const t_pb* pb = clb_nlist.block_pb(blk);
+        count_arithmetic_modes_recurr(pb, num_arith_1chain, num_arith_2chains);
+    }
+
+    if (num_arith_1chain == 0 && num_arith_2chains == 0) {
+        return;
+    }
+
+    VTR_LOG("Arithmetic modes usage (ble5):\n");
+    if (num_arith_1chain > 0) {
+        VTR_LOG("  arithmetic_1chain : %d\n", num_arith_1chain);
+    }
+    if (num_arith_2chains > 0) {
+        VTR_LOG("  arithmetic_2chains : %d\n", num_arith_2chains);
+    }
+    VTR_LOG("\n");
+}
+
 void print_pb_type_count_recurr(t_pb_type* pb_type, size_t max_name_chars, size_t curr_depth, std::map<t_pb_type*, int>& pb_type_count) {
     std::string display_name(curr_depth, ' '); //Indent by depth
     display_name += pb_type->name;
@@ -1456,6 +1521,11 @@ void print_pb_type_count(const ClusteredNetlist& clb_nlist) {
         print_pb_type_count_recurr(logical_block_type.pb_type, max_pb_type_name_chars + max_depth, 0, pb_type_count);
     }
     VTR_LOG("\n");
+
+    // Additional Stratix-10 style reporting: show how many BLEs are using
+    // the arithmetic_1chain vs arithmetic_2chains modes (i.e. one vs two
+    // carry chains in the arithmetic mode).
+    print_arithmetic_mode_usage(clb_nlist);
 }
 
 t_logical_block_type_ptr identify_logic_block_type(const std::map<const t_model*, std::vector<t_logical_block_type_ptr>>& primitive_candidate_block_types) {

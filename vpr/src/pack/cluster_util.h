@@ -392,6 +392,15 @@ std::unordered_set<AtomNetId> identify_net_output_feeds_driving_block_input(cons
  */
 size_t update_pb_type_count(const t_pb* pb, std::map<t_pb_type*, int>& pb_type_count, size_t depth);
 
+/**
+ * @brief Print usage statistics for arithmetic BLE modes (arithmetic_1chain /
+ *        arithmetic_2chains) when present in the architecture.
+ *
+ * Intended for Stratix-10 style architectures where the 'ble5' pb_type has
+ * modes named 'arithmetic_1chain' and 'arithmetic_2chains'.
+ */
+void print_arithmetic_mode_usage(const ClusteredNetlist& clb_nlist);
+
 /*
  * @brief This function updates the le_count data structure from the given
  *        packed cluster.
