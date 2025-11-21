@@ -879,7 +879,7 @@ static t_pack_molecule* alloc_and_load_pack_molecules(t_pack_patterns* list_of_p
     // packer to implement in some designs. By marking them as used here, they
     // are skipped during molecule creation and the packer will rely on the
     // simpler chain/simple_chain patterns instead.
-    bool use_simple_chain = true;
+    bool use_simple_chain = false;
     if (const char* env = std::getenv("VTR_FORCE_CHAIN_PATTERN")) {
         if (std::string(env) == "chain") {
             use_simple_chain = false;
@@ -1267,16 +1267,16 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
         // molecules. This effectively disables the second carry
         // chain level in the forced-pack pattern; those adders
         // will be packed as independent atoms instead.
-        if (molecule->is_chain()
-            && pattern_block->pb_type
-            && std::string(pattern_block->pb_type->name) == "adder") {
-            int adder_row = get_pb_placement_index(pattern_block, "adder");
-            if (adder_row > 0) {
-                // Skip mapping this pattern block and do not
-                // expand its connections into the chain molecule.
-                continue;
-            }
-        }
+        // if (molecule->is_chain()
+        //     && pattern_block->pb_type
+        //     && std::string(pattern_block->pb_type->name) == "adder") {
+        //     int adder_row = get_pb_placement_index(pattern_block, "adder");
+        //     if (adder_row > 0) {
+        //         // Skip mapping this pattern block and do not
+        //         // expand its connections into the chain molecule.
+        //         continue;
+        //     }
+        // }
 
         // set this node in the molecule as visited
         molecule->atom_block_ids[pattern_block->block_id] = block_id;
