@@ -879,11 +879,37 @@ static t_pack_molecule* alloc_and_load_pack_molecules(t_pack_patterns* list_of_p
     // packer to implement in some designs. By marking them as used here, they
     // are skipped during molecule creation and the packer will rely on the
     // simpler chain/simple_chain patterns instead.
+    bool use_simple_chain = true;
+    if (const char* env = std::getenv("VTR_FORCE_CHAIN_PATTERN")) {
+        if (std::string(env) == "chain") {
+            use_simple_chain = false;
+        }
+    }
+
+    // Blacklist lut_chain/simple_lut_chain always. Between chain and
+    // simple_chain, allow exactly one based on use_simple_chain.
     for (i = 0; i < num_packing_patterns; i++) {
         const char* patt_name = list_of_pack_patterns[i].name;
-        if (patt_name
-            && (strstr(patt_name, "lut_chain") != nullptr)) {
+        if (!patt_name) continue;
+
+        // Never force-pack lut-based chains
+        if (strstr(patt_name, "lut_chain") != nullptr) {
             is_used[i] = true;
+            continue;
+        }
+        if (strstr(patt_name, "simple_lut_chain") != nullptr) {
+            is_used[i] = true;
+            continue;
+        }
+        // Allow either chain or simple_chain, but not both
+        if (use_simple_chain) {
+            if (strcmp(patt_name, "chain") == 0) {
+                is_used[i] = true;
+            }
+        } else {
+            if (strcmp(patt_name, "simple_chain") == 0) {
+                is_used[i] = true;
+            }
         }
     }
 
