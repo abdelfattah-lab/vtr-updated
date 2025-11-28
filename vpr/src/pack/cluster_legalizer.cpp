@@ -330,20 +330,60 @@ static bool check_cluster_noc_group(AtomBlockId atom_blk_id,
 static enum e_block_pack_status check_chain_root_placement_feasibility(const t_pb_graph_node* pb_graph_node,
                                                                 const t_pack_molecule* molecule,
                                                                 const AtomBlockId blk_id) {
-    // Relax chain root placement constraints.
-    //
-    // Original logic required long chains (or chains driven from outside
-    // the cluster) to start only at specific chain_root_pins tie-offs.
-    // This is too restrictive for architectures like DCC3 where valid
-    // chains may begin at different adder rows within the cluster.
-    //
-    // We now treat any primitive which can legally implement the root atom
-    // as a feasible starting point; other legality checks (primitive type
-    // feasibility, routing, etc.) still apply.
-    (void)pb_graph_node;
-    (void)molecule;
-    (void)blk_id;
-    return e_block_pack_status::BLK_PASSED;
+    const AtomContext& atom_ctx = g_vpr_ctx.atom();
+
+    enum e_block_pack_status block_pack_status = e_block_pack_status::BLK_PASSED;
+
+    bool is_long_chain = molecule->chain_info->is_long_chain;
+
+    const auto& chain_root_pins = molecule->pack_pattern->chain_root_pins;
+
+    t_model_ports* root_port = chain_root_pins[0][0]->port->model_port;
+    AtomNetId chain_net_id;
+    auto port_id = atom_ctx.nlist.find_atom_port(blk_id, root_port);
+
+    if (port_id) {
+        chain_net_id = atom_ctx.nlist.port_net(port_id, chain_root_pins[0][0]->pin_number);
+    }
+
+    // if this block is part of a long chain or it is driven by a cluster
+    // input pin we need to check the placement legality of this block
+    // Depending on the logic synthesis even small chains that can fit within one
+    // cluster might need to start at the top of the cluster as their input can be
+    // driven by a global gnd or vdd. Therefore even if this is not a long chain
+    // but its input pin is driven by a net, the placement legality is checked.
+    if (is_long_chain || chain_net_id) {
+        auto chain_id = molecule->chain_info->chain_id;
+        // if this chain has a chain id assigned to it (implies is_long_chain too)
+        if (chain_id != -1) {
+            // the chosen primitive should be a valid starting point for the chain
+            // long chains should only be placed at the top of the chain tieOff = 0
+            if (pb_graph_node != chain_root_pins[chain_id][0]->parent_node) {
+                VTR_LOG("check_chain_root_placement_feasibility: FAILED - pb_graph_node %s != chain_root_pin parent %s for chain_id %d\n", pb_graph_node->hierarchical_type_name().c_str(), chain_root_pins[chain_id][0]->parent_node->hierarchical_type_name().c_str(), chain_id);
+                block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
+            }
+            // the chain doesn't have an assigned chain_id yet
+        } else {
+            VTR_LOG("check_chain_root_placement_feasibility: FAILED - No chain_id assigned, checking all chains\n");
+            block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
+            for (const auto& chain : chain_root_pins) {
+                for (auto tieOff : chain) {
+                    // check if this chosen primitive is one of the possible
+                    // starting points for this chain.
+                    if (pb_graph_node == tieOff->parent_node) {
+                        // this location matches with the one of the dedicated chain
+                        // input from outside logic block, therefore it is feasible
+                        block_pack_status = e_block_pack_status::BLK_PASSED;
+                        break;
+                    }
+                    // long chains should only be placed at the top of the chain tieOff = 0
+                    if (is_long_chain) break;
+                }
+            }
+        }
+    }
+
+    return block_pack_status;
 }
 
 /*
@@ -476,6 +516,8 @@ try_place_atom_block_rec(const t_pb_graph_node* pb_graph_node,
                          t_lb_router_data* router_data,
                          int verbosity,
                          const int feasible_block_array_size) {
+    VTR_LOG("try_place_atom_block_rec: blk_id=%zu molecule=%s pb_graph_node=%s\n", size_t(blk_id), molecule->pack_pattern->name, pb_graph_node->hierarchical_type_name().c_str());
+    bool is_primitive = pb_graph_node->is_primitive();
     const AtomContext& atom_ctx = g_vpr_ctx.atom();
     AtomContext& mutable_atom_ctx = g_vpr_ctx.mutable_atom();
 
@@ -517,6 +559,7 @@ try_place_atom_block_rec(const t_pb_graph_node* pb_graph_node,
     } else {
         /* if this is not the first child of this parent, must match existing parent mode */
         if (parent_pb->mode != pb_graph_node->pb_type->parent_mode->index) {
+            VTR_LOG("try_place_atom_block_rec: FAILED - parent_pb mode %d != pb_graph_node parent mode %d\n", parent_pb->mode, pb_graph_node->pb_type->parent_mode->index);
             return e_block_pack_status::BLK_FAILED_FEASIBLE;
         }
     }
@@ -542,10 +585,11 @@ try_place_atom_block_rec(const t_pb_graph_node* pb_graph_node,
      * Early exit to flag failure
      */
     if (true == pb_type->parent_mode->disable_packing) {
+        VTR_LOG("try_place_atom_block_rec: FAILED - parent mode packing disabled\n");
         return e_block_pack_status::BLK_FAILED_FEASIBLE;
     }
 
-    bool is_primitive = (pb_type->num_modes == 0);
+    is_primitive = (pb_type->num_modes == 0);
 
     if (is_primitive) {
         VTR_ASSERT(!atom_ctx.lookup.pb_atom(pb)
@@ -567,6 +611,7 @@ try_place_atom_block_rec(const t_pb_graph_node* pb_graph_node,
         add_atom_as_target(router_data, blk_id);
         if (!primitive_feasible(blk_id, pb)) {
             /* failed location feasibility check, revert pack */
+            VTR_LOG("try_place_atom_block_rec: FAILED - primitive_feasible returned false for blk_id %zu at %s\n", size_t(blk_id), pb->hierarchical_type_name().c_str());
             block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
         }
 
@@ -1148,8 +1193,7 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
                                                         LegalizationCluster& cluster,
                                                         LegalizationClusterId cluster_id,
                                                         const t_ext_pin_util& max_external_pin_util) {
-    // Try to pack the molecule into a cluster with this pb type.
-
+    VTR_LOG("ClusterLegalizer::try_pack_molecule: molecule=%s\n", molecule->pack_pattern->name);
     // Safety debugs.
     VTR_ASSERT_DEBUG(molecule != nullptr);
     VTR_ASSERT_DEBUG(cluster.pb != nullptr);
@@ -1278,12 +1322,14 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
             reset_lookahead_pins_used(cluster.pb);
             try_update_lookahead_pins_used(cluster.pb, atom_cluster_);
             if (!check_lookahead_pins_used(cluster.pb, max_external_pin_util)) {
-                VTR_LOGV(log_verbosity_ > 4, "\t\t\tFAILED Pin Feasibility Filter\n");
+                VTR_LOGV(log_verbosity_ > 1, "\t\t\tFAILED Pin Feasibility Filter\n");
                 block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
             } else {
-                VTR_LOGV(log_verbosity_ > 3, "\t\t\tPin Feasibility: Passed pin feasibility filter\n");
+                VTR_LOGV(log_verbosity_ > 1, "\t\t\tPin Feasibility: Passed pin feasibility filter\n");
             }
         }
+
+        VTR_LOG("ClusterLegalizer::try_pack_molecule: current_status=%d\n", (int)block_pack_status);
 
         if (block_pack_status == e_block_pack_status::BLK_PASSED) {
             /*
@@ -1425,7 +1471,7 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
     // Reset the cluster placement stats after packing a molecule.
     // TODO: Not sure if this has to go here, but it makes sense to do it.
     reset_tried_but_unused_cluster_placements(cluster.placement_stats);
-
+    VTR_LOG("ClusterLegalizer::try_pack_molecule: result=%d\n", (int)block_pack_status);
     return block_pack_status;
 }
 
@@ -1433,6 +1479,7 @@ std::tuple<e_block_pack_status, LegalizationClusterId>
 ClusterLegalizer::start_new_cluster(t_pack_molecule* molecule,
                                     t_logical_block_type_ptr cluster_type,
                                     int cluster_mode) {
+    VTR_LOG("ClusterLegalizer::start_new_cluster: molecule=%s type=%s mode=%d\n", molecule->pack_pattern->name, cluster_type->name.c_str(), cluster_mode);
     // Safety asserts to ensure the API is being called with valid arguments.
     VTR_ASSERT_DEBUG(molecule != nullptr);
     VTR_ASSERT_DEBUG(cluster_type != nullptr);
@@ -1499,7 +1546,7 @@ ClusterLegalizer::start_new_cluster(t_pack_molecule* molecule,
         free_cluster_placement_stats(new_cluster.placement_stats);
         new_cluster_id = LegalizationClusterId::INVALID();
     }
-
+    VTR_LOG("ClusterLegalizer::start_new_cluster: result=%d\n", (int)pack_status);
     return {pack_status, new_cluster_id};
 }
 
@@ -1529,7 +1576,11 @@ e_block_pack_status ClusterLegalizer::add_mol_to_cluster(t_pack_molecule* molecu
     // If the packing was successful, set the molecules' cluster to this one.
     if (pack_status == e_block_pack_status::BLK_PASSED)
         molecule_cluster_[molecule] = cluster_id;
-
+    else {
+        // Reset the molecule info if the packing failed
+        reset_molecule_info(molecule);
+    }
+    VTR_LOG("ClusterLegalizer::try_pack_molecule: result=%d\n", (int)pack_status);
     return pack_status;
 }
 

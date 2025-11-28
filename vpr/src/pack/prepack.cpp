@@ -174,7 +174,7 @@ static void modify_molecule(t_pack_molecule* molecule,
                             t_pack_pattern_block* pattern_block,
                             const AtomNetlist& atom_nlist);
 
-static bool check_lut_chain_molecules(t_pack_molecule* molecule);
+static bool check_lut_chain_molecules(t_pack_molecule* molecule, const AtomNetlist& atom_nlist);
 
 /*****************************************/
 /*Function Definitions					 */
@@ -869,7 +869,6 @@ static t_pack_molecule* alloc_and_load_pack_molecules(t_pack_patterns* list_of_p
      * TODO: Need to investigate better mapping strategies than first-fit
      */
     for (i = 0; i < num_packing_patterns; i++) {
-
         best_pattern = 0;
         for (j = 1; j < num_packing_patterns; j++) {
             if (is_used[best_pattern]) {
@@ -926,7 +925,6 @@ static t_pack_molecule* alloc_and_load_pack_molecules(t_pack_patterns* list_of_p
      * more difficult because now it needs to consider splitting molecules.
      */
     for (auto blk_id : atom_nlist.blocks()) {
-
         expected_lowest_cost_pb_gnode[blk_id] = get_expected_lowest_cost_primitive_for_atom_block(blk_id, logical_block_types);
 
         auto rng = atom_molecules.equal_range(blk_id);
@@ -1072,11 +1070,11 @@ static t_pack_molecule* try_create_molecule(t_pack_patterns* list_of_pack_patter
         }
     } else {
         // Failed to create molecule
-        if (debug_lut_chain) {
-            VTR_LOG("try_create_molecule: pattern %s, root atom %s -> EXPAND FAIL\n",
-                    pack_pattern->name,
-                    atom_nlist.block_name(blk_id).c_str());
-        }
+        // if (debug_lut_chain) {
+        //     VTR_LOG("try_create_molecule: pattern %s, root atom %s -> EXPAND FAIL\n",
+        //             pack_pattern->name,
+        //             atom_nlist.block_name(blk_id).c_str());
+        // }
         delete molecule;
         return nullptr;
     }
@@ -1139,12 +1137,12 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
         // if this primitive position in this molecule is already visited and
         // matches block in the atom netlist go to the next node in the queue
         if (molecule_atom_block_id) {
-            if (debug_lut_chain) {
-                VTR_LOG("try_expand_molecule[%s]: block_id %s already placed at pattern_block %d\n",
-                        pattern_name.c_str(),
-                        atom_nlist.block_name(block_id).c_str(),
-                        pattern_block->block_id);
-            }
+            // if (debug_lut_chain) {
+            //     VTR_LOG("try_expand_molecule[%s]: block_id %s already placed at pattern_block %d\n",
+            //             pattern_name.c_str(),
+            //             atom_nlist.block_name(block_id).c_str(),
+            //             pattern_block->block_id);
+            // }
             continue;
         }
 
@@ -1158,24 +1156,24 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
             // at that primitive position, then creating this molecule has failed
             // otherwise go to the next atom block and its corresponding pattern block
             if (!is_block_optional[pattern_block->block_id]) {
-                if (debug_lut_chain) {
-                    VTR_LOG("try_expand_molecule[%s]: FAIL at mandatory pattern_block %d (blk_id=%s, feasible=%d, already_used=%d)\n",
-                            pattern_name.c_str(),
-                            pattern_block->block_id,
-                            block_id ? atom_nlist.block_name(block_id).c_str() : "INVALID",
-                            block_id ? primitive_type_feasible(block_id, pattern_block->pb_type) : 0,
-                            block_id ? (atom_molecules.find(block_id) != atom_molecules.end()) : 0);
-                }
+                // if (debug_lut_chain) {
+                //     VTR_LOG("try_expand_molecule[%s]: FAIL at mandatory pattern_block %d (blk_id=%s, feasible=%d, already_used=%d)\n",
+                //             pattern_name.c_str(),
+                //             pattern_block->block_id,
+                //             block_id ? atom_nlist.block_name(block_id).c_str() : "INVALID",
+                //             block_id ? primitive_type_feasible(block_id, pattern_block->pb_type) : 0,
+                //             block_id ? (atom_molecules.find(block_id) != atom_molecules.end()) : 0);
+                // }
                 return false;
             }
-            if (debug_lut_chain) {
-                VTR_LOG("try_expand_molecule[%s]: skip optional pattern_block %d (blk_id=%s, feasible=%d, already_used=%d)\n",
-                        pattern_name.c_str(),
-                        pattern_block->block_id,
-                        block_id ? atom_nlist.block_name(block_id).c_str() : "INVALID",
-                        block_id ? primitive_type_feasible(block_id, pattern_block->pb_type) : 0,
-                        block_id ? (atom_molecules.find(block_id) != atom_molecules.end()) : 0);
-            }
+            // if (debug_lut_chain) {
+            //     VTR_LOG("try_expand_molecule[%s]: skip optional pattern_block %d (blk_id=%s, feasible=%d, already_used=%d)\n",
+            //             pattern_name.c_str(),
+            //             pattern_block->block_id,
+            //             block_id ? atom_nlist.block_name(block_id).c_str() : "INVALID",
+            //             block_id ? primitive_type_feasible(block_id, pattern_block->pb_type) : 0,
+            //             block_id ? (atom_molecules.find(block_id) != atom_molecules.end()) : 0);
+            // }
             continue;
         }
 
@@ -1212,8 +1210,7 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
                 auto ipin = block_connection->to_pin->pin_number;
                 auto driver_blk_id = get_driving_block(block_id, port_model, ipin, atom_nlist);
 
-                if (molecule->is_chain() && port_model != cin_port_model &&
-                        block_connection->to_pin->parent_node->pb_type == block_connection->from_pin->parent_node->pb_type) {
+                if (molecule->is_chain() && port_model != cin_port_model && block_connection->to_pin->parent_node->pb_type == block_connection->from_pin->parent_node->pb_type) {
                     has_second_level = true;
                 }
                 // add this driver block id with its corresponding pattern block to the queue
@@ -1243,9 +1240,9 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
                 pattern_name.c_str(), has_second_level, hierarchical_molecule, found_second_level);
         }
         return false;
-    }
-    else {
-        VTR_LOG("try_expand_molecule[%s]: valid molecule; " 
+    } else {
+        VTR_LOG(
+            "try_expand_molecule[%s]: valid molecule; "
             "(has_second_level=%d, hierarchical_molecule=%d, found_second_level=%d)\n",
             pattern_name.c_str(), has_second_level, hierarchical_molecule, found_second_level);
     }
@@ -1253,7 +1250,7 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
     if (molecule->is_chain()) {
         bool reachable = chain_input_is_reachable(molecule, atom_molecules, atom_nlist);
         bool alm_ok = check_alm_input_limitation(molecule, atom_nlist);
-        bool lut_ok = check_lut_chain_molecules(molecule);
+        bool lut_ok = check_lut_chain_molecules(molecule, atom_nlist);
         if (debug_lut_chain) {
             VTR_LOG("try_expand_molecule[%s]: chain checks reachable=%d alm_ok=%d lut_ok=%d\n",
                     pattern_name.c_str(),
@@ -1339,7 +1336,6 @@ static AtomBlockId get_driving_block(const AtomBlockId block_id,
  * For chains we allow the driving block to drive multiple sinks; we always
  * return the unique driver of the net (if any), regardless of fanout.
  */
-
 
 static void print_pack_molecules(const char* fname,
                                  const t_pack_patterns* list_of_pack_patterns,
@@ -1834,12 +1830,6 @@ static void update_chain_root_pins(t_pack_patterns* chain_pattern,
  *  will be only one pin connected to the very first adder in the cluster.
  */
 static void get_all_connected_primitive_pins(const t_pb_graph_pin* cluster_input_pin, std::vector<t_pb_graph_pin*>& connected_primitive_pins) {
-    /* Skip pins for modes that are disabled for packing*/
-    if ((nullptr != cluster_input_pin->parent_node->pb_type->parent_mode)
-        && (true == cluster_input_pin->parent_node->pb_type->parent_mode->disable_packing)) {
-        return;
-    }
-
     for (int iedge = 0; iedge < cluster_input_pin->num_output_edges; iedge++) {
         const auto& output_edge = cluster_input_pin->output_edges[iedge];
         for (int ipin = 0; ipin < output_edge->num_output_pins; ipin++) {
@@ -1850,6 +1840,7 @@ static void get_all_connected_primitive_pins(const t_pb_graph_pin* cluster_input
             }
         }
     }
+    VTR_ASSERT(connected_primitive_pins.size());
 }
 
 /**
@@ -2341,8 +2332,8 @@ static bool molecule_is_hierarchical(const t_pack_molecule* molecule) {
 
     while (connection) {
         if (connection->from_block == root_block
-                && connection->from_pin->port->model_port != cout_pin_model
-                && connection->from_pin->parent_node->pb_type == connection->to_pin->parent_node->pb_type) {
+            && connection->from_pin->port->model_port != cout_pin_model
+            && connection->from_pin->parent_node->pb_type == connection->to_pin->parent_node->pb_type) {
             return true;
         }
         connection = connection->next;
@@ -2380,7 +2371,7 @@ static AtomBlockId is_second_level_block(const t_pack_pattern_block* pattern_blo
     while (connection) {
         // if this block is being driven by this connection and the port being driven is not cin port
         if (connection->to_block == pattern_block
-                && connection->to_pin->port->model_port != cin_port_model) {
+            && connection->to_pin->port->model_port != cin_port_model) {
             return molecule->atom_block_ids[connection->from_block->block_id];
         }
         connection = connection->next;
@@ -2615,8 +2606,7 @@ static void modify_molecule(t_pack_molecule* molecule,
     }
 }
 
-static bool check_lut_chain_molecules(t_pack_molecule* molecule) {
-
+static bool check_lut_chain_molecules(t_pack_molecule* molecule, const AtomNetlist& atom_nlist) {
     std::string pattern_name(molecule->pack_pattern->name);
     if (pattern_name.find("lut_chain") == std::string::npos) return true;
 
@@ -2629,15 +2619,14 @@ static bool check_lut_chain_molecules(t_pack_molecule* molecule) {
     t_pb_type* lut_pb_type = nullptr;
 
     while (connection) {
-       if (connection->to_block == pattern_block && connection->to_pin->port->model_port != cin_port_model) {
-           lut_pb_type = connection->from_pin->parent_node->pb_type;
-           break;
-       }
-       connection = connection->next;
+        if (connection->to_block == pattern_block && connection->to_pin->port->model_port != cin_port_model) {
+            lut_pb_type = connection->from_pin->parent_node->pb_type;
+            break;
+        }
+        connection = connection->next;
     }
 
     VTR_ASSERT(lut_pb_type);
-
 
     std::queue<t_pack_pattern_block*> pattern_block_queue;
     pattern_block_queue.push(pattern_block);
@@ -2653,8 +2642,7 @@ static bool check_lut_chain_molecules(t_pack_molecule* molecule) {
         if (!pattern_block || visited_blocks[pattern_block->block_id])
             continue;
 
-        if (molecule->atom_block_ids[pattern_block->block_id] &&
-            pattern_block->pb_type == lut_pb_type)
+        if (molecule->atom_block_ids[pattern_block->block_id] && pattern_block->pb_type == lut_pb_type)
             return true;
 
         visited_blocks[pattern_block->block_id] = true;
@@ -2669,6 +2657,37 @@ static bool check_lut_chain_molecules(t_pack_molecule* molecule) {
         }
     }
 
-    return false;
+    VTR_LOG("check_lut_chain_molecules: Failed for pattern %s. Dump of primitives found:\n", pattern_name.c_str());
 
+    // Re-initialize for printing
+    std::fill(visited_blocks.begin(), visited_blocks.end(), false);
+    while (!pattern_block_queue.empty())
+        pattern_block_queue.pop();
+    pattern_block_queue.push(molecule->pack_pattern->root_block);
+
+    while (!pattern_block_queue.empty()) {
+        pattern_block = pattern_block_queue.front();
+        pattern_block_queue.pop();
+
+        if (!pattern_block || visited_blocks[pattern_block->block_id])
+            continue;
+
+        visited_blocks[pattern_block->block_id] = true;
+
+        if (molecule->atom_block_ids[pattern_block->block_id]) {
+            VTR_LOG("  Block ID: %zu, Name: %s, Type: %s\n",
+                    size_t(molecule->atom_block_ids[pattern_block->block_id]),
+                    atom_nlist.block_name(molecule->atom_block_ids[pattern_block->block_id]).c_str(),
+                    pattern_block->pb_type->name);
+        }
+
+        auto block_connections = pattern_block->connections;
+        while (block_connections) {
+            pattern_block_queue.push(block_connections->from_block);
+            pattern_block_queue.push(block_connections->to_block);
+            block_connections = block_connections->next;
+        }
+    }
+
+    return false;
 }

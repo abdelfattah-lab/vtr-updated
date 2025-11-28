@@ -450,7 +450,7 @@ LegalizationClusterId GreedyClusterer::start_new_cluster(
                          });
     }
 
-    if (log_verbosity_ > 2) {
+    if (true) {
         VTR_LOG("\tSeed: '%s' (%s)", root_atom_name.c_str(), root_model->name);
         VTR_LOGV(seed_mol->pack_pattern, " molecule_type %s molecule_size %zu",
                  seed_mol->pack_pattern->name, seed_mol->atom_block_ids.size());
@@ -465,17 +465,18 @@ LegalizationClusterId GreedyClusterer::start_new_cluster(
         //Try packing into each mode
         e_block_pack_status pack_result = e_block_pack_status::BLK_STATUS_UNDEFINED;
         for (int j = 0; j < type->pb_graph_head->pb_type->num_modes && !success; j++) {
+            VTR_LOG("Attempting to pack seed %s into type %s mode %d (%s)\n", root_atom_name.c_str(), type->name.c_str(), j, type->pb_graph_head->pb_type->modes[j].name);
             std::tie(pack_result, new_cluster_id) = cluster_legalizer.start_new_cluster(seed_mol, type, j);
             success = (pack_result == e_block_pack_status::BLK_PASSED);
         }
 
         if (success) {
-            VTR_LOGV(log_verbosity_ > 2, "\tPASSED_SEED: Block Type %s\n", type->name.c_str());
+            VTR_LOG("PASSED_SEED: Block Type %s\n", type->name.c_str());
             // If clustering succeeds return the new_cluster_id and type.
             block_type = type;
             break;
         } else {
-            VTR_LOGV(log_verbosity_ > 2, "\tFAILED_SEED: Block Type %s\n", type->name.c_str());
+            VTR_LOG("FAILED_SEED: Block Type %s\n", type->name.c_str());
         }
     }
 
@@ -498,11 +499,10 @@ LegalizationClusterId GreedyClusterer::start_new_cluster(
     VTR_ASSERT(success);
     VTR_ASSERT(new_cluster_id.is_valid());
 
-    VTR_LOGV(log_verbosity_ > 2,
-             "Complex block %zu: '%s' (%s) ", size_t(new_cluster_id),
+    VTR_LOG("Complex block %zu: '%s' (%s) ", size_t(new_cluster_id),
              cluster_legalizer.get_cluster_pb(new_cluster_id)->name,
              cluster_legalizer.get_cluster_type(new_cluster_id)->name.c_str());
-    VTR_LOGV(log_verbosity_ > 2, ".");
+    VTR_LOG(".");
     //Progress dot for seed-block
     fflush(stdout);
 
@@ -534,6 +534,10 @@ bool GreedyClusterer::try_add_candidate_mol_to_cluster(t_pack_molecule* candidat
     VTR_ASSERT(candidate_mol != nullptr);
     VTR_ASSERT(!cluster_legalizer.is_mol_clustered(candidate_mol));
     VTR_ASSERT(legalization_cluster_id.is_valid());
+
+    AtomBlockId blk_id = candidate_mol->atom_block_ids[candidate_mol->root];
+    std::string blk_name = atom_netlist_.block_name(blk_id);
+    VTR_LOG("Attempting to add candidate molecule %s (root: %s) to cluster\n", candidate_mol->pack_pattern->name, blk_name.c_str());
 
     e_block_pack_status pack_status = cluster_legalizer.add_mol_to_cluster(candidate_mol,
                                                                       legalization_cluster_id);
