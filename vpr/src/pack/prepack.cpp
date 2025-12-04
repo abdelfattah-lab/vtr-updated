@@ -1366,10 +1366,6 @@ static t_pack_molecule* try_create_molecule(t_pack_patterns* list_of_pack_patter
 
     // Check pack pattern validity
     if (pack_pattern == nullptr || pack_pattern->num_blocks == 0 || pack_pattern->root_block == nullptr) {
-        if (debug_lut_chain) {
-            VTR_LOG("try_create_molecule: pattern %s invalid (no blocks or root)\n",
-                    pack_pattern->name);
-        }
         return nullptr;
     }
 
@@ -1379,26 +1375,8 @@ static t_pack_molecule* try_create_molecule(t_pack_patterns* list_of_pack_patter
         AtomBlockId orig_blk_id = blk_id;
         blk_id = find_new_root_atom_for_chain(blk_id, pack_pattern, atom_molecules, atom_nlist);
         if (!blk_id) {
-            if (debug_lut_chain) {
-                VTR_LOG("try_create_molecule: pattern %s root %s -> no valid chain root\n",
-                        pack_pattern->name,
-                        atom_nlist.block_name(orig_blk_id).c_str());
-            }
             return nullptr;
         }
-
-        if (debug_lut_chain && blk_id != orig_blk_id) {
-            VTR_LOG("try_create_molecule: pattern %s root remapped %s -> %s\n",
-                    pack_pattern->name,
-                    atom_nlist.block_name(orig_blk_id).c_str(),
-                    atom_nlist.block_name(blk_id).c_str());
-        }
-    }
-
-    if (debug_lut_chain) {
-        VTR_LOG("try_create_molecule: pattern %s, root atom %s\n",
-                pack_pattern->name,
-                atom_nlist.block_name(blk_id).c_str());
     }
 
     molecule = new t_pack_molecule;
@@ -1410,13 +1388,6 @@ static t_pack_molecule* try_create_molecule(t_pack_patterns* list_of_pack_patter
 
     if (try_expand_molecule(molecule, blk_id, atom_molecules, atom_nlist)) {
         // Success! commit molecule
-
-        if (debug_lut_chain) {
-            VTR_LOG("try_create_molecule: pattern %s, root atom %s -> EXPAND SUCCESS\n",
-                    pack_pattern->name,
-                    atom_nlist.block_name(blk_id).c_str());
-        }
-
         // update chain info for chain molecules
         if (molecule->pack_pattern->is_chain) {
             init_molecule_chain_info(blk_id, molecule, atom_molecules, atom_nlist);
@@ -1433,12 +1404,6 @@ static t_pack_molecule* try_create_molecule(t_pack_patterns* list_of_pack_patter
             atom_molecules.insert({blk_id2, molecule});
         }
     } else {
-        // Failed to create molecule
-        // if (debug_lut_chain) {
-        //     VTR_LOG("try_create_molecule: pattern %s, root atom %s -> EXPAND FAIL\n",
-        //             pack_pattern->name,
-        //             atom_nlist.block_name(blk_id).c_str());
-        // }
         delete molecule;
         return nullptr;
     }
@@ -1501,12 +1466,6 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
         // if this primitive position in this molecule is already visited and
         // matches block in the atom netlist go to the next node in the queue
         if (molecule_atom_block_id) {
-            // if (debug_lut_chain) {
-            //     VTR_LOG("try_expand_molecule[%s]: block_id %s already placed at pattern_block %d\n",
-            //             pattern_name.c_str(),
-            //             atom_nlist.block_name(block_id).c_str(),
-            //             pattern_block->block_id);
-            // }
             continue;
         }
 
@@ -1520,24 +1479,8 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
             // at that primitive position, then creating this molecule has failed
             // otherwise go to the next atom block and its corresponding pattern block
             if (!is_block_optional[pattern_block->block_id]) {
-                // if (debug_lut_chain) {
-                //     VTR_LOG("try_expand_molecule[%s]: FAIL at mandatory pattern_block %d (blk_id=%s, feasible=%d, already_used=%d)\n",
-                //             pattern_name.c_str(),
-                //             pattern_block->block_id,
-                //             block_id ? atom_nlist.block_name(block_id).c_str() : "INVALID",
-                //             block_id ? primitive_type_feasible(block_id, pattern_block->pb_type) : 0,
-                //             block_id ? (atom_molecules.find(block_id) != atom_molecules.end()) : 0);
-                // }
                 return false;
             }
-            // if (debug_lut_chain) {
-            //     VTR_LOG("try_expand_molecule[%s]: skip optional pattern_block %d (blk_id=%s, feasible=%d, already_used=%d)\n",
-            //             pattern_name.c_str(),
-            //             pattern_block->block_id,
-            //             block_id ? atom_nlist.block_name(block_id).c_str() : "INVALID",
-            //             block_id ? primitive_type_feasible(block_id, pattern_block->pb_type) : 0,
-            //             block_id ? (atom_molecules.find(block_id) != atom_molecules.end()) : 0);
-            // }
             continue;
         }
 
@@ -1597,20 +1540,8 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
     // chain instance. Hierarchical placement constraints are only applied
     // when a valid second-level candidate is actually present.
     if (!has_second_level && hierarchical_molecule) {
-        if (debug_lut_chain) {
-            VTR_LOG(
-                "try_expand_molecule[%s]: no second-level block found; "
-                "treating as non-hierarchical (has_second_level=%d, hierarchical_molecule=%d, found_second_level=%d)\n",
-                pattern_name.c_str(), has_second_level, hierarchical_molecule, found_second_level);
-        }
         return false;
-    } else {
-        VTR_LOG(
-            "try_expand_molecule[%s]: valid molecule; "
-            "(has_second_level=%d, hierarchical_molecule=%d, found_second_level=%d)\n",
-            pattern_name.c_str(), has_second_level, hierarchical_molecule, found_second_level);
     }
-
     if (molecule->is_chain()) {
         bool reachable = chain_input_is_reachable(molecule, atom_molecules, atom_nlist);
         bool alm_ok = check_alm_input_limitation(molecule, atom_nlist);

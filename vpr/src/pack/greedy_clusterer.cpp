@@ -529,34 +529,19 @@ LegalizationClusterId GreedyClusterer::start_new_cluster(
 bool GreedyClusterer::try_add_candidate_mol_to_cluster(t_pack_molecule* candidate_mol,
                                                        LegalizationClusterId legalization_cluster_id,
                                                        ClusterLegalizer& cluster_legalizer) {
-    VTR_LOG("try_add_candidate_mol_to_cluster: entered\n");
     VTR_ASSERT(candidate_mol != nullptr);
-    VTR_LOG("try_add_candidate_mol_to_cluster: checking is_mol_clustered\n");
     VTR_ASSERT(!cluster_legalizer.is_mol_clustered(candidate_mol));
-    VTR_LOG("try_add_candidate_mol_to_cluster: checking legalization_cluster_id\n");
     VTR_ASSERT(legalization_cluster_id.is_valid());
 
-    VTR_LOG("try_add_candidate_mol_to_cluster: accessing atom_block_ids\n");
     AtomBlockId blk_id = candidate_mol->atom_block_ids[candidate_mol->root];
-    VTR_LOG("try_add_candidate_mol_to_cluster: checking blk_id valid\n");
     VTR_ASSERT(blk_id.is_valid());
-    VTR_LOG("try_add_candidate_mol_to_cluster: getting block name\n");
     // std::string blk_name = atom_netlist_.block_name(blk_id);
     const auto& blk_name_ref = atom_netlist_.block_name(blk_id);
-    VTR_LOG("try_add_candidate_mol_to_cluster: got block name ref\n");
     std::string blk_name = blk_name_ref;
-    VTR_LOG("try_add_candidate_mol_to_cluster: copied block name: %s\n", blk_name.c_str());
 
-    VTR_LOG("try_add_candidate_mol_to_cluster: checking pack_pattern %p\n", candidate_mol->pack_pattern);
-    if (candidate_mol->pack_pattern) {
-        VTR_LOG("try_add_candidate_mol_to_cluster: pack_pattern name: %s\n", candidate_mol->pack_pattern->name);
-    } else {
-        VTR_LOG("try_add_candidate_mol_to_cluster: pack_pattern is NULL\n");
-    }
-
-    VTR_LOG("Attempting to add candidate molecule %s (root: %s) to cluster\n",
-            (candidate_mol->pack_pattern ? candidate_mol->pack_pattern->name : "NULL"),
-            blk_name.c_str());
+    // VTR_LOG("Attempting to add candidate molecule %s (root: %s) to cluster\n",
+    //         (candidate_mol->pack_pattern ? candidate_mol->pack_pattern->name : "NULL"),
+    //         blk_name.c_str());
 
     e_block_pack_status pack_status = cluster_legalizer.add_mol_to_cluster(candidate_mol,
                                                                            legalization_cluster_id);
