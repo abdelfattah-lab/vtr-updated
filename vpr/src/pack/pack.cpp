@@ -279,7 +279,7 @@ bool try_pack(t_packer_opts* packer_opts,
     /******************** End **************************/
 
     //check clustering and output it
-    check_and_output_clustering(cluster_legalizer, *packer_opts, is_clock, arch);
+    check_and_output_clustering(cluster_legalizer, prepacker, *packer_opts, is_clock, arch);
 
     VTR_LOG("\n");
     VTR_LOG("Netlist conversion complete.\n");

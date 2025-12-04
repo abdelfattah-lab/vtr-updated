@@ -330,7 +330,7 @@ void FullLegalizer::create_clusters(const PartialPlacement& p_placement) {
 
     // Check and output the clustering.
     std::unordered_set<AtomNetId> is_clock = alloc_and_load_is_clock();
-    check_and_output_clustering(cluster_legalizer, packer_opts_, is_clock, arch_);
+    check_and_output_clustering(cluster_legalizer, prepacker_, packer_opts_, is_clock, arch_);
     // Reset the cluster legalizer. This is required to load the packing.
     cluster_legalizer.reset();
     // Regenerate the clustered netlist from the file generated previously.

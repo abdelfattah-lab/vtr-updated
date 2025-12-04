@@ -2211,7 +2211,7 @@ static void init_molecule_chain_info(const AtomBlockId blk_id,
     if (!driver_atom_id || itr == atom_molecules.end()) {
         // allocate chain info
         molecule->chain_info = std::make_shared<t_chain_info>();
-        molecule->chain_info->chain_id = 0;
+        // chain_id defaults to -1 for short chains (no specific architectural chain assigned)
         // this is not the first molecule to be created for this chain
     } else {
         // molecule driving blk_id
