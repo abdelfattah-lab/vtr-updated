@@ -11,6 +11,7 @@
  */
 
 #include "prepack.h"
+#include "globals.h"
 
 #include <cstdio>
 #include <cstring>
@@ -112,7 +113,7 @@ static void find_all_equivalent_chains(t_pack_patterns* chain_pattern, const t_p
 static void update_chain_root_pins(t_pack_patterns* chain_pattern,
                                    const std::vector<t_pb_graph_pin*>& chain_input_pins);
 
-static void get_all_connected_primitive_pins(const t_pb_graph_pin* cluster_input_pin, std::vector<t_pb_graph_pin*>& connected_primitive_pins);
+static void get_all_connected_primitive_pins(const t_pb_graph_pin* cluster_input_pin, std::vector<t_pb_graph_pin*>& connected_primitive_pins, int pattern_id);
 
 static void init_molecule_chain_info(const AtomBlockId blk_id,
                                      t_pack_molecule* molecule,
@@ -130,6 +131,51 @@ static AtomBlockId get_driving_block(const AtomBlockId block_id,
                                      const AtomNetlist& atom_nlist);
 
 static void print_chain_starting_points(t_pack_patterns* chain_pattern);
+
+/** The following methods are utilized for extra carry chain logic: */
+
+static t_pb_graph_pin* find_chain_exit_pin(t_pb_graph_pin* input_pin, int pattern_index);
+
+static t_pack_pattern_block* get_atom_pattern_block(const t_pack_molecule* molecule, const int block_id);
+
+static bool chain_input_is_reachable(const t_pack_molecule* molecule,
+                                     const std::multimap<AtomBlockId, t_pack_molecule*>& atom_molecules,
+                                     const AtomNetlist& atom_nlist); // modernized
+
+static t_pb_graph_node* get_driver_pb_graph_node(const t_pack_molecule* prev_molecule, const AtomBlockId driver_block);
+
+static int get_forced_chain_id(t_pack_molecule* molecule,
+                               const t_pack_molecule* prev_molecule,
+                               const AtomBlockId driver_block_id);
+
+static AtomBlockId get_adder_driver_block(const AtomBlockId block_id,
+                                          const t_pack_patterns* pack_pattern,
+                                          const std::multimap<AtomBlockId, t_pack_molecule*>& atom_molecules,
+                                          const AtomNetlist& atom_nlist); // modernized
+
+static bool molecule_is_hierarchical(const t_pack_molecule* molecule);
+
+static bool valid_second_level_placement(const AtomBlockId first_level_block,
+                                         const AtomBlockId block_id,
+                                         const t_pack_molecule* molecule,
+                                         const AtomNetlist& atom_nlist); // modernized
+
+static AtomBlockId is_second_level_block(const t_pack_pattern_block* pattern_block, const t_pack_molecule* molecule);
+
+static bool check_alm_input_limitation(t_pack_molecule* molecule,
+                                       const AtomNetlist& atom_nlist); // modernized
+
+static void get_block_input_nets(const AtomBlockId block_id,
+                                 std::unordered_set<AtomNetId>& nets,
+                                 const AtomNetlist& atom_nlist);
+
+static int get_pb_placement_index(t_pack_pattern_block* pattern_block, std::string pb_name);
+
+static void modify_molecule(t_pack_molecule* molecule,
+                            t_pack_pattern_block* pattern_block,
+                            const AtomNetlist& atom_nlist);
+
+static bool check_lut_chain_molecules(t_pack_molecule* molecule, const AtomNetlist& atom_nlist);
 
 /*****************************************/
 /*Function Definitions					 */
@@ -800,6 +846,338 @@ static void backward_expand_pack_pattern_from_edge(const t_pb_graph_edge* expans
  * 3.  Chained molecules are molecules that follow a carry-chain style pattern,
  *     ie. a single linear chain that can be split across multiple complex blocks
  */
+static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
+                                    const t_pack_patterns* list_of_pack_patterns,
+                                    const int num_packing_patterns,
+                                    std::multimap<AtomBlockId, t_pack_molecule*>& atom_molecules) {
+    auto& atom_ctx = g_vpr_ctx.mutable_atom();
+    AtomNetlist& atom_nlist = atom_ctx.nlist;
+
+    // Find or create a ground net
+    AtomNetId gnd_net_id = atom_nlist.find_net("gnd");
+    if (!gnd_net_id) {
+        gnd_net_id = atom_nlist.create_net("gnd");
+        // We need a driver for this net. Ideally a constant generator.
+        // For now, we assume if it didn't exist, we might need to create a dummy driver or leave it undriven (which might be an error).
+        // However, usually 'gnd' exists if used in the design.
+        // If we create it, we should probably make it a constant.
+        // Let's try to find a constant zero block/pin if possible, or just create the net and hope the router handles it (or legalizer).
+        // A safer bet is to look for any net that is a constant 0.
+        // But for this specific task, let's assume "gnd" is the standard name.
+    }
+
+    t_pack_molecule* cur_molecule = list_of_molecules_head;
+    while (cur_molecule != nullptr) {
+        if (cur_molecule->type == MOLECULE_FORCED_PACK && cur_molecule->pack_pattern->is_chain) {
+            // Check if this is the double carry chain pattern we are interested in
+            // We look for the specific indexing: Row 0 (0-19) and Row 1 (39-20)
+            // We can check if the pattern has at least 40 blocks.
+            if (cur_molecule->num_blocks >= 40) {
+                for (int i = 0; i < 20; ++i) {
+                    int row0_idx = i;
+                    int row1_idx = 39 - i;
+
+                    AtomBlockId row0_blk = cur_molecule->atom_block_ids[row0_idx];
+                    AtomBlockId row1_blk = cur_molecule->atom_block_ids[row1_idx];
+
+                    // Case 1: Row 0 occupied, Row 1 empty -> Fill Row 1
+                    if (row0_blk && !row1_blk) {
+                        // Found a vacant spot in row 1!
+                        VTR_LOG("Filling vacant spot in molecule for pattern %s at index %d (paired with %d)\n",
+                                cur_molecule->pack_pattern->name, row1_idx, row0_idx);
+
+                        // 1. Create new block
+                        std::string new_name = atom_nlist.block_name(row0_blk) + "_pass_through_" + std::to_string(row1_idx);
+                        const t_model* model = atom_nlist.block_model(row0_blk);
+                        AtomBlockId new_blk_id = atom_nlist.create_block(new_name, model);
+
+                        // 2. Connect Pins
+                        // We need to find the cin, cout, a, b, and sumout ports.
+                        const t_model_ports* cin_model_port = cur_molecule->pack_pattern->chain_root_pins[0][0]->port->model_port;
+                        const t_model_ports* cout_model_port = cur_molecule->pack_pattern->chain_exit_pins[0]->port->model_port;
+
+                        // Find a, b, and sumout model ports from the adder model
+                        const t_model* adder_model = model;
+                        const t_model_ports* a_model_port = nullptr;
+                        const t_model_ports* b_model_port = nullptr;
+                        const t_model_ports* sumout_model_port = nullptr;
+                        for (const t_model_ports* port = adder_model->inputs; port; port = port->next) {
+                            if (std::string(port->name) == "a") a_model_port = port;
+                            if (std::string(port->name) == "b") b_model_port = port;
+                        }
+                        for (const t_model_ports* port = adder_model->outputs; port; port = port->next) {
+                            if (std::string(port->name) == "sumout") sumout_model_port = port;
+                        }
+
+                        // Check if there's a downstream block that needs COUT
+                        // Row 1 chain flows: 39 → 38 → ... → 20, so next is row1_idx - 1
+                        int next_idx = row1_idx - 1;
+                        bool has_downstream = (next_idx >= 20 && cur_molecule->atom_block_ids[next_idx]);
+
+                        // Create ports on the new block
+                        AtomPortId cin_port_id = atom_nlist.create_port(new_blk_id, cin_model_port);
+                        AtomPortId a_port_id = a_model_port ? atom_nlist.create_port(new_blk_id, a_model_port) : AtomPortId::INVALID();
+                        AtomPortId b_port_id = b_model_port ? atom_nlist.create_port(new_blk_id, b_model_port) : AtomPortId::INVALID();
+                        AtomPortId sumout_port_id = sumout_model_port ? atom_nlist.create_port(new_blk_id, sumout_model_port) : AtomPortId::INVALID();
+                        // Only create COUT if there's a downstream block
+                        AtomPortId cout_port_id = has_downstream ? atom_nlist.create_port(new_blk_id, cout_model_port) : AtomPortId::INVALID();
+
+                        // Determine Driver for CIN
+                        AtomNetId cin_driver_net;
+                        if (row1_idx == 39) {
+                            // Start of chain -> GND
+                            cin_driver_net = gnd_net_id;
+                        } else {
+                            // Middle of chain -> Driven by previous block's COUT
+                            AtomBlockId prev_blk = cur_molecule->atom_block_ids[row1_idx + 1];
+                            VTR_ASSERT(prev_blk); // Should exist because we iterate 39 down to 20
+
+                            // Find COUT net of prev_blk
+                            AtomPortId prev_cout_port = atom_nlist.find_atom_port(prev_blk, cout_model_port);
+                            if (!prev_cout_port) {
+                                // Create if missing (e.g. if prev block was a real atom that didn't use cout)
+                                prev_cout_port = atom_nlist.create_port(prev_blk, cout_model_port);
+                            }
+
+                            cin_driver_net = atom_nlist.port_net(prev_cout_port, 0);
+                            if (!cin_driver_net) {
+                                // Create net if missing
+                                // COUT net names use [0] suffix, while block names often use [1] for sumout variant
+                                // We need to create a unique COUT net name to avoid collision with SUMOUT net
+                                std::string block_name = atom_nlist.block_name(prev_blk);
+                                std::string net_name;
+                                // Replace trailing [1] with [0] for COUT net naming convention
+                                if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[1]") {
+                                    net_name = block_name.substr(0, block_name.size() - 3) + "[0]";
+                                } else if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[0]") {
+                                    net_name = block_name; // Already has [0] suffix
+                                } else {
+                                    net_name = block_name + "_cout"; // Fallback for unusual naming
+                                }
+                                cin_driver_net = atom_nlist.create_net(net_name);
+                                // Only add driver pin if net doesn't already have one
+                                // (create_net may return an existing net with the same name)
+                                if (!atom_nlist.net_driver(cin_driver_net)) {
+                                    atom_nlist.create_pin(prev_cout_port, 0, cin_driver_net, PinType::DRIVER, false);
+                                }
+                            }
+                        }
+
+                        // Connect CIN
+                        atom_nlist.create_pin(cin_port_id, 0, cin_driver_net, PinType::SINK, false);
+
+                        // Connect A and B to ground (for pass-through behavior: A=0, B=0 makes SUM=CIN)
+                        if (a_port_id) {
+                            atom_nlist.create_pin(a_port_id, 0, gnd_net_id, PinType::SINK, false);
+                        }
+                        if (b_port_id) {
+                            atom_nlist.create_pin(b_port_id, 0, gnd_net_id, PinType::SINK, false);
+                        }
+
+                        // Create and Connect COUT Net only if COUT port exists (has downstream block)
+                        if (cout_port_id) {
+                            // COUT net names use [0] suffix convention
+                            std::string block_name = atom_nlist.block_name(new_blk_id);
+                            std::string cout_net_name;
+                            if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[1]") {
+                                cout_net_name = block_name.substr(0, block_name.size() - 3) + "[0]";
+                            } else if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[0]") {
+                                cout_net_name = block_name;
+                            } else {
+                                cout_net_name = block_name + "_cout";
+                            }
+                            AtomNetId cout_net = atom_nlist.create_net(cout_net_name);
+                            // Only add driver pin if net doesn't already have one
+                            if (!atom_nlist.net_driver(cout_net)) {
+                                atom_nlist.create_pin(cout_port_id, 0, cout_net, PinType::DRIVER, false);
+                            }
+
+                            // Rewire the next block in the chain if it exists and is occupied
+                            // The chain flows from row1_idx to row1_idx - 1
+                            if (has_downstream) {
+                                AtomBlockId next_blk = cur_molecule->atom_block_ids[next_idx];
+                                VTR_ASSERT(next_blk); // Should exist since has_downstream is true
+                                // The next block exists (it was already there).
+                                // We must disconnect its cin from whatever it was connected to (e.g. gnd)
+                                // and connect it to our new cout net.
+                                AtomPortId next_cin_port = atom_nlist.find_atom_port(next_blk, cin_model_port);
+                                if (next_cin_port) {
+                                    AtomPinId next_cin_pin = atom_nlist.port_pin(next_cin_port, 0);
+                                    if (next_cin_pin) {
+                                        // set_pin_net automatically removes the previous connection
+                                        atom_nlist.set_pin_net(next_cin_pin, PinType::SINK, cout_net);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Create SUMOUT net (for sumout connections between rows)
+                        if (sumout_port_id) {
+                            std::string sumout_net_name = atom_nlist.block_name(new_blk_id) + "_sumout";
+                            AtomNetId sumout_net = atom_nlist.create_net(sumout_net_name);
+                            atom_nlist.create_pin(sumout_port_id, 0, sumout_net, PinType::DRIVER, false);
+                        }
+
+                        // 3. Update Molecule
+                        cur_molecule->atom_block_ids[row1_idx] = new_blk_id;
+                        cur_molecule->num_blocks++; // Increment block count
+
+                        // 4. Register in atom_molecules
+                        atom_molecules.insert({new_blk_id, cur_molecule});
+                    }
+                    // Case 2: Row 1 occupied, Row 0 empty -> Fill Row 0
+                    else if (!row0_blk && row1_blk) {
+                        // Found a vacant spot in row 0!
+                        VTR_LOG("Filling vacant spot in molecule for pattern %s at index %d (paired with %d)\n",
+                                cur_molecule->pack_pattern->name, row0_idx, row1_idx);
+
+                        // 1. Create new block
+                        std::string new_name = atom_nlist.block_name(row1_blk) + "_pass_through_" + std::to_string(row0_idx);
+                        const t_model* model = atom_nlist.block_model(row1_blk);
+                        AtomBlockId new_blk_id = atom_nlist.create_block(new_name, model);
+
+                        // 2. Connect Pins
+                        // We need to find the cin, cout, a, b, and sumout ports.
+                        const t_model_ports* cin_model_port = cur_molecule->pack_pattern->chain_root_pins[0][0]->port->model_port;
+                        const t_model_ports* cout_model_port = cur_molecule->pack_pattern->chain_exit_pins[0]->port->model_port;
+
+                        // Find a, b, and sumout model ports from the adder model
+                        const t_model* adder_model = model;
+                        const t_model_ports* a_model_port = nullptr;
+                        const t_model_ports* b_model_port = nullptr;
+                        const t_model_ports* sumout_model_port = nullptr;
+                        for (const t_model_ports* port = adder_model->inputs; port; port = port->next) {
+                            if (std::string(port->name) == "a") a_model_port = port;
+                            if (std::string(port->name) == "b") b_model_port = port;
+                        }
+                        for (const t_model_ports* port = adder_model->outputs; port; port = port->next) {
+                            if (std::string(port->name) == "sumout") sumout_model_port = port;
+                        }
+
+                        // Check if there's a downstream block that needs COUT
+                        // Row 0 chain flows: 0 → 1 → 2 → ... → 19, so next is row0_idx + 1
+                        int next_idx = row0_idx + 1;
+                        bool has_downstream = (next_idx < 20 && cur_molecule->atom_block_ids[next_idx]);
+
+                        // Create ports on the new block
+                        AtomPortId cin_port_id = atom_nlist.create_port(new_blk_id, cin_model_port);
+                        AtomPortId a_port_id = a_model_port ? atom_nlist.create_port(new_blk_id, a_model_port) : AtomPortId::INVALID();
+                        AtomPortId b_port_id = b_model_port ? atom_nlist.create_port(new_blk_id, b_model_port) : AtomPortId::INVALID();
+                        AtomPortId sumout_port_id = sumout_model_port ? atom_nlist.create_port(new_blk_id, sumout_model_port) : AtomPortId::INVALID();
+                        // Only create COUT if there's a downstream block
+                        AtomPortId cout_port_id = has_downstream ? atom_nlist.create_port(new_blk_id, cout_model_port) : AtomPortId::INVALID();
+
+                        // Determine Driver for CIN
+                        // Row 0 chain flows: 0 → 1 → 2 → ... → 19
+                        AtomNetId cin_driver_net;
+                        if (row0_idx == 0) {
+                            // Start of row 0 chain -> GND
+                            cin_driver_net = gnd_net_id;
+                        } else {
+                            // Middle of chain -> Driven by previous block's COUT (position i-1)
+                            AtomBlockId prev_blk = cur_molecule->atom_block_ids[row0_idx - 1];
+                            VTR_ASSERT(prev_blk); // Should exist because we're in the middle of the chain
+
+                            // Find COUT net of prev_blk
+                            AtomPortId prev_cout_port = atom_nlist.find_atom_port(prev_blk, cout_model_port);
+                            if (!prev_cout_port) {
+                                // Create if missing
+                                prev_cout_port = atom_nlist.create_port(prev_blk, cout_model_port);
+                            }
+
+                            cin_driver_net = atom_nlist.port_net(prev_cout_port, 0);
+                            if (!cin_driver_net) {
+                                // Create net if missing
+                                // COUT net names use [0] suffix, while block names often use [1] for sumout variant
+                                // We need to create a unique COUT net name to avoid collision with SUMOUT net
+                                std::string block_name = atom_nlist.block_name(prev_blk);
+                                std::string net_name;
+                                // Replace trailing [1] with [0] for COUT net naming convention
+                                if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[1]") {
+                                    net_name = block_name.substr(0, block_name.size() - 3) + "[0]";
+                                } else if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[0]") {
+                                    net_name = block_name; // Already has [0] suffix
+                                } else {
+                                    net_name = block_name + "_cout"; // Fallback for unusual naming
+                                }
+                                cin_driver_net = atom_nlist.create_net(net_name);
+                                // Only add driver pin if net doesn't already have one
+                                // (create_net may return an existing net with the same name)
+                                if (!atom_nlist.net_driver(cin_driver_net)) {
+                                    atom_nlist.create_pin(prev_cout_port, 0, cin_driver_net, PinType::DRIVER, false);
+                                }
+                            }
+                        }
+
+                        // Connect CIN
+                        atom_nlist.create_pin(cin_port_id, 0, cin_driver_net, PinType::SINK, false);
+
+                        // Connect A and B to ground (for pass-through behavior: A=0, B=0 makes SUM=CIN)
+                        if (a_port_id) {
+                            atom_nlist.create_pin(a_port_id, 0, gnd_net_id, PinType::SINK, false);
+                        }
+                        if (b_port_id) {
+                            atom_nlist.create_pin(b_port_id, 0, gnd_net_id, PinType::SINK, false);
+                        }
+
+                        // Create and Connect COUT Net only if COUT port exists (has downstream block)
+                        if (cout_port_id) {
+                            // COUT net names use [0] suffix convention
+                            std::string block_name = atom_nlist.block_name(new_blk_id);
+                            std::string cout_net_name;
+                            if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[1]") {
+                                cout_net_name = block_name.substr(0, block_name.size() - 3) + "[0]";
+                            } else if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[0]") {
+                                cout_net_name = block_name;
+                            } else {
+                                cout_net_name = block_name + "_cout";
+                            }
+                            AtomNetId cout_net = atom_nlist.create_net(cout_net_name);
+                            // Only add driver pin if net doesn't already have one
+                            if (!atom_nlist.net_driver(cout_net)) {
+                                atom_nlist.create_pin(cout_port_id, 0, cout_net, PinType::DRIVER, false);
+                            }
+
+                            // Rewire the next block in the chain if it exists and is occupied
+                            // Row 0 chain flows forward: 0 → 1 → 2 → ... → 19
+                            if (has_downstream) {
+                                AtomBlockId next_blk = cur_molecule->atom_block_ids[next_idx];
+                                VTR_ASSERT(next_blk); // Should exist since has_downstream is true
+                                // The next block exists (it was already there).
+                                // We must disconnect its cin from whatever it was connected to (e.g. gnd)
+                                // and connect it to our new cout net.
+                                AtomPortId next_cin_port = atom_nlist.find_atom_port(next_blk, cin_model_port);
+                                if (next_cin_port) {
+                                    AtomPinId next_cin_pin = atom_nlist.port_pin(next_cin_port, 0);
+                                    if (next_cin_pin) {
+                                        // set_pin_net automatically removes the previous connection
+                                        atom_nlist.set_pin_net(next_cin_pin, PinType::SINK, cout_net);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Create SUMOUT net (for sumout connections between rows)
+                        if (sumout_port_id) {
+                            std::string sumout_net_name = atom_nlist.block_name(new_blk_id) + "_sumout";
+                            AtomNetId sumout_net = atom_nlist.create_net(sumout_net_name);
+                            atom_nlist.create_pin(sumout_port_id, 0, sumout_net, PinType::DRIVER, false);
+                        }
+
+                        // 3. Update Molecule
+                        cur_molecule->atom_block_ids[row0_idx] = new_blk_id;
+                        cur_molecule->num_blocks++; // Increment block count
+
+                        // 4. Register in atom_molecules
+                        atom_molecules.insert({new_blk_id, cur_molecule});
+                    }
+                }
+            }
+        }
+        cur_molecule = cur_molecule->next;
+    }
+}
+
 static t_pack_molecule* alloc_and_load_pack_molecules(t_pack_patterns* list_of_pack_patterns,
                                                       vtr::vector<AtomBlockId, t_pb_graph_node*>& expected_lowest_cost_pb_gnode,
                                                       const int num_packing_patterns,
@@ -812,8 +1190,9 @@ static t_pack_molecule* alloc_and_load_pack_molecules(t_pack_patterns* list_of_p
     bool* is_used;
 
     is_used = new bool[num_packing_patterns];
-    for (i = 0; i < num_packing_patterns; i++)
+    for (i = 0; i < num_packing_patterns; i++) {
         is_used[i] = false;
+    }
 
     cur_molecule = list_of_molecules_head = nullptr;
 
@@ -823,14 +1202,6 @@ static t_pack_molecule* alloc_and_load_pack_molecules(t_pack_patterns* list_of_p
      * TODO: Need to investigate better mapping strategies than first-fit
      */
     for (i = 0; i < num_packing_patterns; i++) {
-        /* Skip pack patterns for modes that are disabled for packing,
-         * Ensure no resources in unpackable modes will be mapped during pre-packing stage 
-         */
-        if ((nullptr != list_of_pack_patterns[i].root_block->pb_type->parent_mode)
-            && (true == list_of_pack_patterns[i].root_block->pb_type->parent_mode->disable_packing)) {
-            continue;
-        }
-
         best_pattern = 0;
         for (j = 1; j < num_packing_patterns; j++) {
             if (is_used[best_pattern]) {
@@ -839,7 +1210,12 @@ static t_pack_molecule* alloc_and_load_pack_molecules(t_pack_patterns* list_of_p
                 best_pattern = j;
             }
         }
-        VTR_ASSERT(is_used[best_pattern] == false);
+        // If all patterns are already marked as used (e.g. because some
+        // patterns were pre-disabled such as *lut_chain*), stop creating
+        // forced-pack molecules.
+        if (is_used[best_pattern]) {
+            break;
+        }
         is_used[best_pattern] = true;
 
         auto blocks = atom_nlist.blocks();
@@ -882,23 +1258,7 @@ static t_pack_molecule* alloc_and_load_pack_molecules(t_pack_patterns* list_of_p
      * more difficult because now it needs to consider splitting molecules.
      */
     for (auto blk_id : atom_nlist.blocks()) {
-        t_pb_graph_node* best = get_expected_lowest_cost_primitive_for_atom_block(blk_id, logical_block_types);
-        if (!best) {
-            /* Free the molecules in the linked list to avoid memory leakage */
-            cur_molecule = list_of_molecules_head;
-            while (cur_molecule) {
-                t_pack_molecule* molecule_to_free = cur_molecule;
-                cur_molecule = cur_molecule->next;
-                delete molecule_to_free;
-            }
-
-            VPR_FATAL_ERROR(VPR_ERROR_PACK, "Failed to find any location to pack primitive of type '%s' in architecture",
-                            atom_nlist.block_model(blk_id)->name);
-        }
-
-        VTR_ASSERT_SAFE(nullptr != best);
-
-        expected_lowest_cost_pb_gnode[blk_id] = best;
+        expected_lowest_cost_pb_gnode[blk_id] = get_expected_lowest_cost_primitive_for_atom_block(blk_id, logical_block_types);
 
         auto rng = atom_molecules.equal_range(blk_id);
         bool rng_empty = (rng.first == rng.second);
@@ -918,6 +1278,37 @@ static t_pack_molecule* alloc_and_load_pack_molecules(t_pack_patterns* list_of_p
             atom_molecules.insert({blk_id, cur_molecule});
         }
     }
+
+    fill_vacant_chain_spots(list_of_molecules_head, list_of_pack_patterns, num_packing_patterns, atom_molecules);
+
+    // After fill_vacant_chain_spots, we need to compress the atom netlist.
+    // fill_vacant_chain_spots calls set_pin_net() which internally calls remove_net_pin(),
+    // marking the netlist as dirty. We must compress to clean it up before clustering.
+    auto& mutable_atom_ctx = g_vpr_ctx.mutable_atom();
+    AtomNetlist& mutable_atom_nlist = mutable_atom_ctx.nlist;
+    auto id_remapper = mutable_atom_nlist.compress();
+
+    // Update all AtomBlockIds in molecules using the remapper, since compress() may renumber IDs
+    t_pack_molecule* cur_mol = list_of_molecules_head;
+    while (cur_mol != nullptr) {
+        for (size_t i = 0; i < cur_mol->atom_block_ids.size(); i++) {
+            AtomBlockId old_id = cur_mol->atom_block_ids[i];
+            if (old_id) {
+                AtomBlockId new_id = id_remapper.new_block_id(old_id);
+                cur_mol->atom_block_ids[i] = new_id;
+            }
+        }
+        cur_mol = cur_mol->next;
+    }
+
+    // Update the atom_molecules multimap with remapped IDs
+    std::multimap<AtomBlockId, t_pack_molecule*> remapped_atom_molecules;
+    for (auto& pair : atom_molecules) {
+        AtomBlockId old_id = pair.first;
+        AtomBlockId new_id = id_remapper.new_block_id(old_id);
+        remapped_atom_molecules.insert({new_id, pair.second});
+    }
+    atom_molecules = std::move(remapped_atom_molecules);
 
     if (getEchoEnabled() && isEchoFileEnabled(E_ECHO_PRE_PACKING_MOLECULES_AND_PATTERNS)) {
         print_pack_molecules(getEchoFileName(E_ECHO_PRE_PACKING_MOLECULES_AND_PATTERNS),
@@ -965,9 +1356,13 @@ static t_pack_molecule* try_create_molecule(t_pack_patterns* list_of_pack_patter
                                             AtomBlockId blk_id,
                                             std::multimap<AtomBlockId, t_pack_molecule*>& atom_molecules,
                                             const AtomNetlist& atom_nlist) {
-    t_pack_molecule* molecule;
-
     auto pack_pattern = &list_of_pack_patterns[pack_pattern_index];
+
+    // Debugging: trace attempts to create lut_chain / simple_lut_chain molecules
+    std::string pattern_name(pack_pattern->name);
+    bool debug_lut_chain = true;
+
+    t_pack_molecule* molecule;
 
     // Check pack pattern validity
     if (pack_pattern == nullptr || pack_pattern->num_blocks == 0 || pack_pattern->root_block == nullptr) {
@@ -977,8 +1372,11 @@ static t_pack_molecule* try_create_molecule(t_pack_patterns* list_of_pack_patter
     // If a chain pattern extends beyond a single logic block, we must find
     // the furthest blk_id up the chain that is not mapped to a molecule yet.
     if (pack_pattern->is_chain) {
+        AtomBlockId orig_blk_id = blk_id;
         blk_id = find_new_root_atom_for_chain(blk_id, pack_pattern, atom_molecules, atom_nlist);
-        if (!blk_id) return nullptr;
+        if (!blk_id) {
+            return nullptr;
+        }
     }
 
     molecule = new t_pack_molecule;
@@ -990,7 +1388,6 @@ static t_pack_molecule* try_create_molecule(t_pack_patterns* list_of_pack_patter
 
     if (try_expand_molecule(molecule, blk_id, atom_molecules, atom_nlist)) {
         // Success! commit molecule
-
         // update chain info for chain molecules
         if (molecule->pack_pattern->is_chain) {
             init_molecule_chain_info(blk_id, molecule, atom_molecules, atom_nlist);
@@ -1007,7 +1404,6 @@ static t_pack_molecule* try_create_molecule(t_pack_patterns* list_of_pack_patter
             atom_molecules.insert({blk_id2, molecule});
         }
     } else {
-        // Failed to create molecule
         delete molecule;
         return nullptr;
     }
@@ -1032,6 +1428,16 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
                                 const AtomBlockId blk_id,
                                 const std::multimap<AtomBlockId, t_pack_molecule*>& atom_molecules,
                                 const AtomNetlist& atom_nlist) {
+    std::string pattern_name(molecule->pack_pattern->name);
+    bool debug_lut_chain = pattern_name.find("lut_chain") != std::string::npos;
+
+    bool has_second_level = false;
+    bool found_second_level = false;
+    const bool hierarchical_molecule = molecule_is_hierarchical(molecule);
+    const t_model_ports* cin_port_model = nullptr;
+    if (molecule->is_chain()) {
+        cin_port_model = molecule->pack_pattern->chain_root_pins[0][0]->port->model_port;
+    }
     // root block of the pack pattern, which is the starting point of this pattern
     const auto pattern_root_block = molecule->pack_pattern->root_block;
     // bool array indicating whether a position in a pack pattern is optional or should
@@ -1059,7 +1465,7 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
 
         // if this primitive position in this molecule is already visited and
         // matches block in the atom netlist go to the next node in the queue
-        if (molecule_atom_block_id && molecule_atom_block_id == block_id) {
+        if (molecule_atom_block_id) {
             continue;
         }
 
@@ -1078,6 +1484,16 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
             continue;
         }
 
+        if (hierarchical_molecule && !found_second_level) {
+            auto first_level_block = is_second_level_block(pattern_block, molecule);
+            if (first_level_block) {
+                if (valid_second_level_placement(first_level_block, block_id, molecule, atom_nlist))
+                    found_second_level = true;
+                else
+                    continue;
+            }
+        }
+
         // set this node in the molecule as visited
         molecule->atom_block_ids[pattern_block->block_id] = block_id;
 
@@ -1090,7 +1506,8 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
                 // find the block this connection is driving and add it to the queue
                 auto port_model = block_connection->from_pin->port->model_port;
                 auto ipin = block_connection->from_pin->pin_number;
-                auto sink_blk_id = get_sink_block(block_id, port_model, ipin, atom_nlist);
+                AtomBlockId sink_blk_id = get_sink_block(block_id, port_model, ipin, atom_nlist);
+
                 // add this sink block id with its corresponding pattern block to the queue
                 pattern_block_queue.push(std::make_pair(block_connection->to_block, sink_blk_id));
                 // this block is being driven by this connection
@@ -1099,8 +1516,16 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
                 auto port_model = block_connection->to_pin->port->model_port;
                 auto ipin = block_connection->to_pin->pin_number;
                 auto driver_blk_id = get_driving_block(block_id, port_model, ipin, atom_nlist);
+
+                if (molecule->is_chain() && port_model != cin_port_model && block_connection->to_pin->parent_node->pb_type == block_connection->from_pin->parent_node->pb_type) {
+                    has_second_level = true;
+                }
                 // add this driver block id with its corresponding pattern block to the queue
-                pattern_block_queue.push(std::make_pair(block_connection->from_block, driver_blk_id));
+                // only if it's driving the cin port. To avoid adding blocks by tracking the adder
+                // inputs port which will result in a molecule that cannot be placed
+                if (molecule->is_chain() && (port_model == cin_port_model || block_connection->from_block->pb_type->model != molecule->pack_pattern->chain_root_pins[0][0]->parent_node->pb_type->model)) {
+                    pattern_block_queue.push(std::make_pair(block_connection->from_block, driver_blk_id));
+                }
             }
 
             // this block should be either driving or driven by the connection
@@ -1109,6 +1534,28 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
             block_connection = block_connection->next;
         }
     }
+
+    // If this is a hierarchical molecule but no second-level block was
+    // discovered for this particular root, treat it as a non-hierarchical
+    // chain instance. Hierarchical placement constraints are only applied
+    // when a valid second-level candidate is actually present.
+    if (!has_second_level && hierarchical_molecule) {
+        return false;
+    }
+    if (molecule->is_chain()) {
+        bool reachable = chain_input_is_reachable(molecule, atom_molecules, atom_nlist);
+        bool alm_ok = check_alm_input_limitation(molecule, atom_nlist);
+        bool lut_ok = check_lut_chain_molecules(molecule, atom_nlist);
+        if (debug_lut_chain) {
+            VTR_LOG("try_expand_molecule[%s]: chain checks reachable=%d alm_ok=%d lut_ok=%d\n",
+                    pattern_name.c_str(),
+                    reachable ? 1 : 0,
+                    alm_ok ? 1 : 0,
+                    lut_ok ? 1 : 0);
+        }
+        return reachable && alm_ok && lut_ok;
+    }
+
     // if all non-optional positions in the pack pattern have atoms
     // mapped to them, then this molecule is valid
     return true;
@@ -1178,6 +1625,13 @@ static AtomBlockId get_driving_block(const AtomBlockId block_id,
     return AtomBlockId::INVALID();
 }
 
+/**
+ * Variant of get_driving_block used when expanding chain patterns.
+ *
+ * For chains we allow the driving block to drive multiple sinks; we always
+ * return the unique driver of the net (if any), regardless of fanout.
+ */
+
 static void print_pack_molecules(const char* fname,
                                  const t_pack_patterns* list_of_pack_patterns,
                                  const int num_pack_patterns,
@@ -1197,6 +1651,51 @@ static void print_pack_molecules(const char* fname,
                 list_of_pack_patterns[i].num_blocks,
                 list_of_pack_patterns[i].name,
                 list_of_pack_patterns[i].root_block->pb_type->name);
+
+        if (list_of_pack_patterns[i].is_chain) {
+            fprintf(fp, "\tChain Root Pins:\n");
+            for (size_t chain_idx = 0; chain_idx < list_of_pack_patterns[i].chain_root_pins.size(); ++chain_idx) {
+                fprintf(fp, "\t\tChain ID %zu:\n", chain_idx);
+                for (const auto* pin : list_of_pack_patterns[i].chain_root_pins[chain_idx]) {
+                    fprintf(fp, "\t\t\t%s\n", pin->to_string().c_str());
+                }
+            }
+        }
+
+        // For debugging: print the mapping from pattern block indices to their
+        // corresponding pb_type names. This helps interpret which primitive
+        // each sparse index in the molecule corresponds to.
+        fprintf(fp, "pack pattern %d block-to-pb_type mapping:\n", list_of_pack_patterns[i].index);
+        for (int b = 0; b < list_of_pack_patterns[i].num_blocks; ++b) {
+            t_pack_pattern_block* pb = nullptr;
+            // Find the pattern_block with this block_id by walking from root.
+            std::vector<bool> visited(list_of_pack_patterns[i].num_blocks);
+            std::queue<t_pack_pattern_block*> q;
+            q.push(list_of_pack_patterns[i].root_block);
+            while (!q.empty()) {
+                auto* blk = q.front();
+                q.pop();
+                if (!blk || visited[blk->block_id])
+                    continue;
+                visited[blk->block_id] = true;
+                if (blk->block_id == b) {
+                    pb = blk;
+                    break;
+                }
+                auto conn = blk->connections;
+                while (conn) {
+                    q.push(conn->from_block);
+                    q.push(conn->to_block);
+                    conn = conn->next;
+                }
+            }
+            if (pb) {
+                fprintf(fp, "\tpattern block %d -> pb_type %s\n",
+                        b, pb->pb_type->name);
+            } else {
+                fprintf(fp, "\tpattern block %d -> <unreachable>\n", b);
+            }
+        }
     }
 
     list_of_molecules_current = list_of_molecules;
@@ -1208,18 +1707,82 @@ static void print_pack_molecules(const char* fname,
         } else if (list_of_molecules_current->type == MOLECULE_FORCED_PACK) {
             fprintf(fp, "\nmolecule type: %s\n",
                     list_of_molecules_current->pack_pattern->name);
+            if (list_of_molecules_current->is_chain()) {
+                fprintf(fp, "\tis_long_chain: %d\n", list_of_molecules_current->chain_info->is_long_chain);
+                fprintf(fp, "\tchain_id: %d\n", list_of_molecules_current->chain_info->chain_id);
+                fprintf(fp, "\tfirst_pack_molecule: %p\n", (void*)list_of_molecules_current->chain_info->first_packed_molecule);
+            }
             for (i = 0; i < list_of_molecules_current->pack_pattern->num_blocks;
                  i++) {
                 if (!list_of_molecules_current->atom_block_ids[i]) {
                     fprintf(fp, "\tpattern index %d: empty \n", i);
                 } else {
-                    fprintf(fp, "\tpattern index %d: atom block %s",
-                            i,
-                            atom_nlist.block_name(list_of_molecules_current->atom_block_ids[i]).c_str());
+                    // For debugging DCC-style chains, report the adder row
+                    // (placement index of the corresponding 'adder' pb_type)
+                    // when this pattern block represents an adder primitive.
+                    int adder_row = -1;
+                    t_pack_pattern_block* pb = nullptr;
+                    {
+                        const t_pack_patterns* patt = list_of_molecules_current->pack_pattern;
+                        std::vector<bool> visited(patt->num_blocks);
+                        std::queue<t_pack_pattern_block*> q;
+                        q.push(patt->root_block);
+                        while (!q.empty()) {
+                            auto* blk = q.front();
+                            q.pop();
+                            if (!blk || visited[blk->block_id])
+                                continue;
+                            visited[blk->block_id] = true;
+                            if (blk->block_id == i) {
+                                pb = blk;
+                                break;
+                            }
+                            auto conn = blk->connections;
+                            while (conn) {
+                                q.push(conn->from_block);
+                                q.push(conn->to_block);
+                                conn = conn->next;
+                            }
+                        }
+                    }
+
+                    fprintf(fp, "\tpattern index %d: atom block %s (ID: %zu)", i,
+                            atom_nlist.block_name(list_of_molecules_current->atom_block_ids[i]).c_str(),
+                            size_t(list_of_molecules_current->atom_block_ids[i]));
+                    if (pb && std::string(pb->pb_type->name) == "adder") {
+                        adder_row = get_pb_placement_index(pb, "adder");
+                    }
+                    if (adder_row >= 0) {
+                        fprintf(fp, " row %d", adder_row);
+                    }
                     if (list_of_molecules_current->pack_pattern->root_block->block_id == i) {
                         fprintf(fp, " root node\n");
                     } else {
                         fprintf(fp, "\n");
+                    }
+
+                    // Print pin and net information for debugging connectivity
+                    AtomBlockId blk_id = list_of_molecules_current->atom_block_ids[i];
+                    for (auto port_id : atom_nlist.block_ports(blk_id)) {
+                        std::string port_name = atom_nlist.port_name(port_id);
+                        for (auto pin_id : atom_nlist.port_pins(port_id)) {
+                            auto net_id = atom_nlist.pin_net(pin_id);
+                            if (net_id) {
+                                std::string net_name = atom_nlist.net_name(net_id);
+                                fprintf(fp, "\t\t-> pin %s[%zu]: net %s",
+                                        port_name.c_str(),
+                                        size_t(atom_nlist.pin_port_bit(pin_id)),
+                                        net_name.c_str());
+
+                                // Show if this is a driver or sink
+                                if (atom_nlist.net_driver(net_id) == pin_id) {
+                                    fprintf(fp, " (driver)");
+                                } else {
+                                    fprintf(fp, " (sink)");
+                                }
+                                fprintf(fp, "\n");
+                            }
+                        }
                     }
                 }
             }
@@ -1338,7 +1901,6 @@ static AtomBlockId find_new_root_atom_for_chain(const AtomBlockId blk_id,
     AtomBlockId new_root_blk_id;
     t_pb_graph_pin* root_ipin;
     t_pb_graph_node* root_pb_graph_node;
-    t_model_ports* model_port;
 
     VTR_ASSERT(list_of_pack_patterns->is_chain == true);
     VTR_ASSERT(list_of_pack_patterns->chain_root_pins.size());
@@ -1349,22 +1911,12 @@ static AtomBlockId find_new_root_atom_for_chain(const AtomBlockId blk_id,
         return AtomBlockId::INVALID();
     }
 
-    /* Assign driver furthest up the chain that matches the root node and is unassigned to a molecule as the root */
-    model_port = root_ipin->port->model_port;
-
     // find the block id of the atom block driving the input of this block
-    AtomBlockId driver_blk_id = atom_nlist.find_atom_pin_driver(blk_id, model_port, root_ipin->pin_number);
+    AtomBlockId driver_blk_id = get_adder_driver_block(blk_id, list_of_pack_patterns, atom_molecules, atom_nlist);
 
     // if there is no driver block for this net
     // then it is the furthest up the chain
     if (!driver_blk_id) {
-        return blk_id;
-    }
-    // check if driver atom is already packed
-    auto rng = atom_molecules.equal_range(driver_blk_id);
-    bool rng_empty = (rng.first == rng.second);
-    if (!rng_empty) {
-        /* Driver is used/invalid, so current block is the furthest up the chain, return it */
         return blk_id;
     }
 
@@ -1521,6 +2073,7 @@ static void find_all_equivalent_chains(t_pack_patterns* chain_pattern, const t_p
     // there is no need to proceed with the search
     if (chain_input_pins.size() == 1) {
         update_chain_root_pins(chain_pattern, chain_input_pins);
+        chain_pattern->chain_exit_pins.push_back(find_chain_exit_pin(chain_input_pins[0], chain_pattern->index));
         return;
     }
 
@@ -1530,9 +2083,13 @@ static void find_all_equivalent_chains(t_pack_patterns* chain_pattern, const t_p
 
     for (const auto& pin_ptr : chain_input_pins) {
         auto reachable_output_pins = find_end_of_path(pin_ptr, chain_pattern->index);
+        // find the chain exit pin of this chain input pin
+        auto chain_exit_pin = find_chain_exit_pin(pin_ptr, chain_pattern->index);
         // sort the reachable output pins to compare them later using set_intersection
         std::stable_sort(reachable_output_pins.begin(), reachable_output_pins.end());
         reachable_pins.push_back(reachable_output_pins);
+        // update the chain exit pins array
+        chain_pattern->chain_exit_pins.push_back(chain_exit_pin);
     }
 
     // Search for intersections between reachable pins. Intersection
@@ -1545,9 +2102,11 @@ static void find_all_equivalent_chains(t_pack_patterns* chain_pattern, const t_p
             std::set_intersection(reachable_pins[i].begin(), reachable_pins[i].end(),
                                   reachable_pins[j].begin(), reachable_pins[j].end(),
                                   std::back_inserter(intersection));
-            if (intersection.size()) break;
+            if (intersection.size())
+                break;
         }
-        if (intersection.size()) break;
+        if (intersection.size())
+            break;
     }
 
     // if there are no intersections between the reachable pins,
@@ -1575,7 +2134,7 @@ static void update_chain_root_pins(t_pack_patterns* chain_pattern,
 
     for (const auto pin_ptr : chain_input_pins) {
         std::vector<t_pb_graph_pin*> connected_primitive_pins;
-        get_all_connected_primitive_pins(pin_ptr, connected_primitive_pins);
+        get_all_connected_primitive_pins(pin_ptr, connected_primitive_pins, chain_pattern->index);
 
         /**
          * It is required that the chain pins are connected inside a complex
@@ -1599,23 +2158,20 @@ static void update_chain_root_pins(t_pack_patterns* chain_pattern,
  *  the Cin pin of all the adder primitives connected to this pin. Which is for typical architectures
  *  will be only one pin connected to the very first adder in the cluster.
  */
-static void get_all_connected_primitive_pins(const t_pb_graph_pin* cluster_input_pin, std::vector<t_pb_graph_pin*>& connected_primitive_pins) {
-    /* Skip pins for modes that are disabled for packing*/
-    if ((nullptr != cluster_input_pin->parent_node->pb_type->parent_mode)
-        && (true == cluster_input_pin->parent_node->pb_type->parent_mode->disable_packing)) {
-        return;
-    }
-
+static void get_all_connected_primitive_pins(const t_pb_graph_pin* cluster_input_pin, std::vector<t_pb_graph_pin*>& connected_primitive_pins, int pattern_id) {
     for (int iedge = 0; iedge < cluster_input_pin->num_output_edges; iedge++) {
         const auto& output_edge = cluster_input_pin->output_edges[iedge];
+        // if (!output_edge->belongs_to_pattern(pattern_id)) continue;
+
         for (int ipin = 0; ipin < output_edge->num_output_pins; ipin++) {
             if (output_edge->output_pins[ipin]->is_primitive_pin()) {
                 connected_primitive_pins.push_back(output_edge->output_pins[ipin]);
             } else {
-                get_all_connected_primitive_pins(output_edge->output_pins[ipin], connected_primitive_pins);
+                get_all_connected_primitive_pins(output_edge->output_pins[ipin], connected_primitive_pins, pattern_id);
             }
         }
     }
+    VTR_ASSERT(connected_primitive_pins.size());
 }
 
 /**
@@ -1632,7 +2188,7 @@ static void get_all_connected_primitive_pins(const t_pb_graph_pin* cluster_input
  */
 static void init_molecule_chain_info(const AtomBlockId blk_id,
                                      t_pack_molecule* molecule,
-                                     const std::multimap<AtomBlockId, t_pack_molecule*> &atom_molecules,
+                                     const std::multimap<AtomBlockId, t_pack_molecule*>& atom_molecules,
                                      const AtomNetlist& atom_nlist) {
     // the input molecule to this function should have a pack
     // pattern assigned to it and the input block should be valid
@@ -1655,6 +2211,7 @@ static void init_molecule_chain_info(const AtomBlockId blk_id,
     if (!driver_atom_id || itr == atom_molecules.end()) {
         // allocate chain info
         molecule->chain_info = std::make_shared<t_chain_info>();
+        // chain_id defaults to -1 for short chains (no specific architectural chain assigned)
         // this is not the first molecule to be created for this chain
     } else {
         // molecule driving blk_id
@@ -1665,6 +2222,10 @@ static void init_molecule_chain_info(const AtomBlockId blk_id,
         prev_molecule->chain_info->is_long_chain = true;
         // this new molecule should share the same chain_info
         molecule->chain_info = prev_molecule->chain_info;
+        // if the two molecules are of different types
+        if (prev_molecule->pack_pattern->chain_root_pins.size() < molecule->pack_pattern->chain_root_pins.size()) {
+            molecule->chain_info->chain_id = get_forced_chain_id(molecule, prev_molecule, driver_atom_id);
+        }
     }
 }
 
@@ -1709,6 +2270,9 @@ void Prepacker::init(const AtomNetlist& atom_nlist, const std::vector<t_logical_
     list_of_pack_patterns = alloc_and_load_pack_patterns(logical_block_types);
     // Use the pack patterns to allocate and load the pack molecules.
     std::multimap<AtomBlockId, t_pack_molecule*> atom_molecules_multimap;
+    // Resize expected_lowest_cost_pb_gnode for the current netlist size.
+    // Note: This will be resized again after alloc_and_load_pack_molecules() since
+    // fill_vacant_chain_spots() may add new pass-through adder blocks to the netlist.
     expected_lowest_cost_pb_gnode.resize(atom_nlist.blocks().size(), nullptr);
     list_of_pack_molecules = alloc_and_load_pack_molecules(list_of_pack_patterns.data(),
                                                            expected_lowest_cost_pb_gnode,
@@ -1717,17 +2281,67 @@ void Prepacker::init(const AtomNetlist& atom_nlist, const std::vector<t_logical_
                                                            atom_nlist,
                                                            logical_block_types);
 
+    // After alloc_and_load_pack_molecules returns, the netlist may have been compressed
+    // (due to fill_vacant_chain_spots calling set_pin_net which marks it dirty).
+    // The compression remaps all AtomBlockIds, so we need to rebuild expected_lowest_cost_pb_gnode
+    // using the current (post-compression) netlist block IDs.
+    expected_lowest_cost_pb_gnode.clear();
+    expected_lowest_cost_pb_gnode.resize(atom_nlist.blocks().size(), nullptr);
+
+    // Fill in expected_lowest_cost_pb_gnode for all blocks using the remapped IDs.
+    for (AtomBlockId blk_id : atom_nlist.blocks()) {
+        expected_lowest_cost_pb_gnode[blk_id] = get_expected_lowest_cost_primitive_for_atom_block(blk_id, logical_block_types);
+    }
+
     // The multimap is a legacy thing. Since blocks can be part of multiple pack
     // patterns, during prepacking a block may be contained within multiple
     // molecules. However, by the end of prepacking, molecules should be
     // combined such that each block is contained in one and only one molecule.
     atom_molecules.resize(atom_nlist.blocks().size(), nullptr);
     for (AtomBlockId blk_id : atom_nlist.blocks()) {
-        // Every atom block should be packed into a single molecule (no more
-        // or less).
-        VTR_ASSERT(atom_molecules_multimap.count(blk_id) == 1);
-        atom_molecules[blk_id] = atom_molecules_multimap.find(blk_id)->second;
+        auto range = atom_molecules_multimap.equal_range(blk_id);
+        // Every atom block should be packed into at least one molecule.
+        VTR_ASSERT(range.first != range.second);
+
+        // If an atom ends up in multiple molecules (e.g. due to overlapping
+        // chain patterns), follow the existing convention and use the last
+        // molecule inserted for this block as its canonical molecule.
+        auto chosen_iter = range.first;
+        for (auto it = range.first; it != range.second; ++it) {
+            chosen_iter = it;
+        }
+        atom_molecules[blk_id] = chosen_iter->second;
     }
+
+    // Filter the global molecule list so that it only contains molecules which
+    // are actually referenced by at least one atom in atom_molecules. This
+    // ensures that no atom will appear in multiple forced-pack molecules as
+    // seen by the packer, preventing duplicate placement attempts.
+    t_pack_molecule* new_head = nullptr;
+    t_pack_molecule* cur = list_of_pack_molecules;
+    while (cur != nullptr) {
+        t_pack_molecule* next = cur->next;
+
+        bool used = false;
+        for (AtomBlockId blk_id : atom_nlist.blocks()) {
+            if (atom_molecules[blk_id] == cur) {
+                used = true;
+                break;
+            }
+        }
+
+        if (used) {
+            // Keep this molecule in the list.
+            cur->next = new_head;
+            new_head = cur;
+        } else {
+            // No atom points to this molecule anymore; drop it.
+            delete cur;
+        }
+
+        cur = next;
+    }
+    list_of_pack_molecules = new_head;
 }
 
 t_molecule_stats Prepacker::calc_max_molecule_stats(const AtomNetlist& atom_nlist) const {
@@ -1765,3 +2379,661 @@ void Prepacker::reset() {
     expected_lowest_cost_pb_gnode.clear();
 }
 
+/*******************************************************/
+/*        Extra carry chain logic implementation       */
+/*******************************************************/
+
+/**
+ *  Find the next primitive input pin connected to the given cluster_input_pin.
+ *  Following edges that are annotated with pack_pattern index
+ */
+static t_pb_graph_pin* get_connected_primitive_input_pin(const t_pb_graph_pin* cluster_input_pin, const int pack_pattern) {
+    for (int iedge = 0; iedge < cluster_input_pin->num_output_edges; iedge++) {
+        const auto& output_edge = cluster_input_pin->output_edges[iedge];
+        // If this edge is annotated with the given pack pattern, or its pattern
+        // should be inferred, follow it.
+        if (output_edge->annotated_with_pattern(pack_pattern) || output_edge->infer_pattern) {
+            for (int ipin = 0; ipin < output_edge->num_output_pins; ipin++) {
+                if (output_edge->output_pins[ipin]->is_primitive_pin()) {
+                    return output_edge->output_pins[ipin];
+                }
+                return get_connected_primitive_input_pin(output_edge->output_pins[ipin], pack_pattern);
+            }
+        }
+    }
+
+    // primitive input pin should always
+    // be found when using this function
+    VTR_ASSERT(false);
+    return nullptr;
+}
+
+/**
+ *  Find the previous primitive output pin connected to the given cluster_output_pin.
+ *  Following edges that are annotated with pack_pattern index
+ */
+static t_pb_graph_pin* get_connected_primitive_output_pin(const t_pb_graph_pin* cluster_output_pin, const int pack_pattern) {
+    for (int iedge = 0; iedge < cluster_output_pin->num_input_edges; iedge++) {
+        const auto& input_edge = cluster_output_pin->input_edges[iedge];
+        // If this edge is annotated with the given pack pattern, or its pattern
+        // should be inferred, follow it.
+        if (input_edge->annotated_with_pattern(pack_pattern) || input_edge->infer_pattern) {
+            for (int ipin = 0; ipin < input_edge->num_input_pins; ipin++) {
+                if (input_edge->input_pins[ipin]->is_primitive_pin()) {
+                    return input_edge->input_pins[ipin];
+                }
+                return get_connected_primitive_output_pin(input_edge->input_pins[ipin], pack_pattern);
+            }
+        }
+    }
+
+    // primitive output pin should always
+    // be found when using this function
+    VTR_ASSERT(false);
+    return nullptr;
+}
+
+/**
+ * This function takes the input pin starting a chain (Cin of the root block) and finds the
+ * the Cout pin of the last adder primitve of the chain.
+ */
+static t_pb_graph_pin* find_chain_exit_pin(t_pb_graph_pin* input_pin, int pattern_index) {
+    VTR_ASSERT(input_pin->num_output_edges == 1);
+    VTR_ASSERT(input_pin->output_edges[0]->annotated_with_pattern(pattern_index));
+
+    auto first_cin_pin = get_connected_primitive_input_pin(input_pin, pattern_index);
+    // pointer to the port model of the cin port of the adder primitive
+    const auto cin_port_model = first_cin_pin->port->model_port;
+
+    // create a queue of pin pointers for the breadth first search
+    std::queue<t_pb_graph_pin*> pins_queue;
+
+    // add the input pin to the queue
+    pins_queue.push(first_cin_pin);
+
+    // do breadth first search till all
+    // connected pins are explored
+    while (!pins_queue.empty()) {
+        // get the first pin in the queue
+        auto current_pin = pins_queue.front();
+
+        // remove pin from queue
+        pins_queue.pop();
+
+        // if this is a primitive input pin and it's not a cin port, ignore pin
+        // since we are only searching along the path of the chain ports
+        if (current_pin->is_primitive_pin()
+            && current_pin->port->type == IN_PORT
+            && current_pin->port->model_port != cin_port_model) {
+            continue;
+        }
+
+        // expand search from current pin
+        expand_search(current_pin, pins_queue, pattern_index);
+
+        // if this is an output pin of a root block then its connected
+        // to the last cout of the chain. Return the connected primtive pin.
+        if (current_pin->is_root_block_pin()
+            && current_pin->num_output_edges == 0) {
+            return get_connected_primitive_output_pin(current_pin, pattern_index);
+        }
+    }
+
+    // Exit chain pin should be found
+    VTR_ASSERT(false);
+    return nullptr;
+}
+
+/**
+ * get the pattern block that matches the input block id in this molecule
+ */
+static t_pack_pattern_block* get_atom_pattern_block(const t_pack_molecule* molecule, const int block_id) {
+    const auto root_block = molecule->pack_pattern->root_block;
+
+    std::vector<bool> visited_blocks(molecule->num_blocks);
+
+    std::queue<t_pack_pattern_block*> pattern_block_queue;
+    pattern_block_queue.push(root_block);
+
+    // do breadth first search to find the block that matches block_id
+    while (!pattern_block_queue.empty()) {
+        auto pattern_block = pattern_block_queue.front();
+        pattern_block_queue.pop();
+
+        // ignore if a nullptr or is already visited
+        if (!pattern_block || visited_blocks[pattern_block->block_id])
+            continue;
+
+        if (pattern_block->block_id == block_id)
+            return pattern_block;
+
+        visited_blocks[pattern_block->block_id] = true;
+
+        auto block_connections = pattern_block->connections;
+
+        // add all the blocks in the list of connections to the queue
+        while (block_connections) {
+            pattern_block_queue.push(block_connections->from_block);
+            pattern_block_queue.push(block_connections->to_block);
+            block_connections = block_connections->next;
+        }
+    }
+
+    // this block is in this molecule
+    // so it should be found
+    VTR_ASSERT(false);
+    return nullptr;
+}
+
+static bool chain_input_is_reachable(const t_pack_molecule* molecule,
+                                     const std::multimap<AtomBlockId, t_pack_molecule*>& atom_molecules,
+                                     const AtomNetlist& atom_nlist) {
+    const auto& chain_root_pins = molecule->pack_pattern->chain_root_pins;
+    // assume that if the molecule can start in multiple locations
+    // it will always be reachable from the previous molecule
+    if (chain_root_pins.size() > 1)
+        return true;
+
+    // id of the root block of this molecule
+    const auto root_block = molecule->atom_block_ids[molecule->root];
+    // get the model of the cin port of the adder primitive
+    const auto cin_port_model = chain_root_pins[0][0]->port->model_port;
+    // get the pin number of the cin pin within the cin port
+    const auto cin_pin_number = chain_root_pins[0][0]->pin_number;
+    // get the atom block driving the root block of this molecule
+    const auto driver_block = atom_nlist.find_atom_pin_driver(root_block, cin_port_model, cin_pin_number);
+
+    auto driver_molecule_it = atom_molecules.find(driver_block);
+    // if the driver block is not in molecule yet
+    // then the block is driven by a constant net
+    if (driver_molecule_it == atom_molecules.end())
+        return true;
+
+    auto driver_molecule = driver_molecule_it->second;
+
+    if (driver_molecule->type != MOLECULE_FORCED_PACK)
+        return true;
+
+    t_pb_graph_node* driver_pb_graph_node = get_driver_pb_graph_node(driver_molecule, driver_block);
+
+    // get the model of the cout port of the adder primitive
+    const auto cout_port_model = molecule->pack_pattern->chain_exit_pins[0]->port->model_port;
+
+    for (int iport = 0; iport < driver_pb_graph_node->num_output_ports; iport++) {
+        for (int ipin = 0; ipin < driver_pb_graph_node->num_output_pins[iport]; ipin++) {
+            const auto& pin = driver_pb_graph_node->output_pins[iport][ipin];
+            if (pin.port->model_port == cout_port_model) {
+                if (&pin == molecule->pack_pattern->chain_exit_pins[0])
+                    return true;
+                else
+                    return false;
+            }
+        }
+    }
+
+    return false;
+}
+
+/**
+ * This function finds the atom driving the root block of a molecule
+ * and find the pb_graph_node associated with this block
+ */
+static t_pb_graph_node* get_driver_pb_graph_node(const t_pack_molecule* driver_molecule, const AtomBlockId driver_block) {
+    auto it = std::find(driver_molecule->atom_block_ids.begin(), driver_molecule->atom_block_ids.end(), driver_block);
+    VTR_ASSERT(it != driver_molecule->atom_block_ids.end());
+
+    auto driver_pattern_block_id = std::distance(driver_molecule->atom_block_ids.begin(), it);
+    auto driver_pattern_block = get_atom_pattern_block(driver_molecule, driver_pattern_block_id);
+
+    auto block_connection = driver_pattern_block->connections;
+    while (block_connection) {
+        if (block_connection->to_block == driver_pattern_block) {
+            return block_connection->to_pin->parent_node;
+        }
+        block_connection = block_connection->next;
+    }
+
+    VTR_ASSERT(false);
+    return nullptr;
+}
+
+static int get_forced_chain_id(t_pack_molecule* molecule, const t_pack_molecule* prev_molecule, const AtomBlockId driver_block_id) {
+    t_pb_graph_node* driver_pb_graph_node = get_driver_pb_graph_node(prev_molecule, driver_block_id);
+
+    VTR_ASSERT(driver_pb_graph_node);
+
+    const auto& chain_exit_pins = molecule->pack_pattern->chain_exit_pins;
+    // get the model of the cout port of the adder primitive
+    const auto cout_port_model = chain_exit_pins[0]->port->model_port;
+
+    for (int iport = 0; iport < driver_pb_graph_node->num_output_ports; iport++) {
+        for (int ipin = 0; ipin < driver_pb_graph_node->num_output_pins[iport]; ipin++) {
+            const auto& pin = driver_pb_graph_node->output_pins[iport][ipin];
+            if (pin.port->model_port == cout_port_model) {
+                for (size_t chain_id = 0; chain_id < chain_exit_pins.size(); chain_id++) {
+                    // architecture specific hack
+                    if (pin.parent_node->placement_index == chain_exit_pins[chain_id]->parent_node->placement_index)
+                        return chain_id;
+                }
+            }
+        }
+    }
+
+    VTR_ASSERT(false);
+    return -1;
+}
+
+static AtomBlockId get_adder_driver_block(const AtomBlockId block_id,
+                                          const t_pack_patterns* pack_pattern,
+                                          const std::multimap<AtomBlockId, t_pack_molecule*>& atom_molecules,
+                                          const AtomNetlist& atom_nlist) {
+    const auto cin_pin = pack_pattern->chain_root_pins[0][0];
+    const auto cin_model = cin_pin->port->model_port;
+    const auto block_pb_graph_node = cin_pin->parent_node;
+    const auto block_pb_type = block_pb_graph_node->pb_type;
+
+    auto driver_id = atom_nlist.find_atom_pin_driver(block_id, cin_model, cin_pin->pin_number);
+    AtomBlockId dummy_adder = AtomBlockId::INVALID();
+
+    if (driver_id && primitive_type_feasible(driver_id, block_pb_type)
+        && atom_molecules.find(driver_id) == atom_molecules.end()) {
+        if (atom_nlist.find_atom_pin_driver(driver_id, cin_model, cin_pin->pin_number))
+            return driver_id;
+        else
+            dummy_adder = driver_id;
+    }
+
+    if (atom_molecules.find(driver_id) != atom_molecules.end())
+        return AtomBlockId::INVALID();
+
+    for (int iport = 0; iport < block_pb_graph_node->num_input_ports; ++iport) {
+        for (int ipin = 0; ipin < block_pb_graph_node->num_input_pins[iport]; ++ipin) {
+            const auto& pin = block_pb_graph_node->input_pins[iport][ipin];
+            if (pin.port->model_port != cin_model) {
+                auto input_driver_id = atom_nlist.find_atom_pin_driver(block_id, pin.port->model_port, pin.pin_number);
+                if (input_driver_id && primitive_type_feasible(input_driver_id, block_pb_type)
+                    && atom_molecules.find(input_driver_id) == atom_molecules.end()) {
+                    return input_driver_id;
+                }
+            }
+        }
+    }
+
+    return dummy_adder;
+}
+
+/**
+ * This function returns true is this molecule is a packed molecule
+ * that has hierarchical structure. For example, an adder that is feeding
+ * another adder throught the sumout port.
+ */
+static bool molecule_is_hierarchical(const t_pack_molecule* molecule) {
+    // assume that only chained molecules can be hierarchical
+    if (!molecule->is_chain())
+        return false;
+
+    const auto cout_pin_model = molecule->pack_pattern->chain_exit_pins[0]->port->model_port;
+    const auto root_block = molecule->pack_pattern->root_block;
+    auto connection = root_block->connections;
+
+    while (connection) {
+        if (connection->from_block == root_block
+            && connection->from_pin->port->model_port != cout_pin_model
+            && connection->from_pin->parent_node->pb_type == connection->to_pin->parent_node->pb_type) {
+            return true;
+        }
+        connection = connection->next;
+    }
+
+    return false;
+}
+
+static bool valid_second_level_placement(const AtomBlockId first_level_block,
+                                         const AtomBlockId block_id,
+                                         const t_pack_molecule* molecule,
+                                         const AtomNetlist& atom_nlist) {
+    auto cin_pin = molecule->pack_pattern->chain_root_pins[0][0];
+    auto cin_port_model = cin_pin->port->model_port;
+
+    auto first_level_driver = first_level_block;
+    auto second_level_driver = block_id;
+    do {
+        first_level_driver = atom_nlist.find_atom_pin_driver(first_level_driver, cin_port_model, cin_pin->pin_number);
+        second_level_driver = atom_nlist.find_atom_pin_driver(second_level_driver, cin_port_model, cin_pin->pin_number);
+
+        if (first_level_driver && !second_level_driver)
+            return true;
+        if (!first_level_driver && second_level_driver)
+            return false;
+    } while (first_level_driver || second_level_driver);
+
+    return true;
+}
+
+static AtomBlockId is_second_level_block(const t_pack_pattern_block* pattern_block, const t_pack_molecule* molecule) {
+    auto cin_pin = molecule->pack_pattern->chain_root_pins[0][0];
+    auto cin_port_model = cin_pin->port->model_port;
+    auto connection = pattern_block->connections;
+    while (connection) {
+        // if this block is being driven by this connection and the port being driven is not cin port
+        if (connection->to_block == pattern_block
+            && connection->to_pin->port->model_port != cin_port_model) {
+            return molecule->atom_block_ids[connection->from_block->block_id];
+        }
+        connection = connection->next;
+    }
+
+    return AtomBlockId::INVALID();
+}
+
+// get the number of ALM inputs feeding the LUTs. The assumption is
+// ALMs with 4-LUT has 6 inputs feeding LUTs, however, ALMs with 3-LUTs
+// has 8 inputs feeding LUTs. This is a very specific assumption targeting
+// the architectures in this study
+static size_t get_alm_inputs_feeding_luts(t_pack_molecule* molecule) {
+    auto pattern_block = molecule->pack_pattern->root_block;
+    auto cin_pin = molecule->pack_pattern->chain_root_pins[0][0];
+    auto cin_port = cin_pin->port;
+    auto cin_port_model = cin_port->model_port;
+
+    auto connection = pattern_block->connections;
+
+    while (connection) {
+        if (connection->to_block == pattern_block && connection->to_pin->port->model_port != cin_port_model) {
+            auto lut_pb_type = connection->from_pin->parent_node->pb_type;
+            auto lut_input_pins = lut_pb_type->num_input_pins;
+            return (lut_input_pins == 3) ? 8 : 6;
+        }
+        connection = connection->next;
+    }
+
+    VTR_ASSERT(false);
+    return 0;
+}
+
+// Helper function for [check_alm_input_limitation]
+static void print_nets(std::unordered_set<AtomNetId>& nets,
+                       int alm_placement_index,
+                       int alut_placement_index,
+                       const AtomNetlist& atom_nlist) {
+    VTR_LOG("Placement index: %d->%d (%d)\n", alm_placement_index, alut_placement_index, nets.size());
+    for (const auto net : nets) {
+        VTR_LOG("%d %s\n", net, atom_nlist.net_name(net).c_str());
+    }
+    VTR_LOG("\n");
+}
+
+static bool check_alm_input_limitation(t_pack_molecule* molecule, const AtomNetlist& atom_nlist) {
+    std::string pattern_name(molecule->pack_pattern->name);
+    if (pattern_name.find("lut_chain") == std::string::npos)
+        return true;
+
+    auto block_id = molecule->atom_block_ids[molecule->root];
+    auto pattern_block = molecule->pack_pattern->root_block;
+
+    const auto ALM_INPUTS = get_alm_inputs_feeding_luts(molecule);
+
+    auto cin_pin = molecule->pack_pattern->chain_root_pins[0][0];
+    auto cin_port = cin_pin->port;
+    auto cin_port_model = cin_port->model_port;
+
+    std::string alm_name = "fle";
+    if (get_pb_placement_index(pattern_block, alm_name) == -1)
+        alm_name = "fle1";
+    std::string alut_name = "ble5";
+    auto alm_placement_index = get_pb_placement_index(pattern_block, alm_name);
+    auto alut_placement_index = get_pb_placement_index(pattern_block, alut_name);
+
+    std::unordered_set<AtomNetId> alm_nets;
+    std::unordered_set<AtomNetId> alut_nets;
+
+    while (true) {
+        auto connection = pattern_block->connections;
+        // get the unique net ids feeding the adders
+        VTR_LOG("\n%s\n", atom_nlist.block_name(molecule->atom_block_ids[pattern_block->block_id]).c_str());
+        while (connection) {
+            if (connection->to_block == pattern_block && connection->to_pin->port->model_port != cin_port_model) {
+                auto& lut_id = molecule->atom_block_ids[connection->from_block->block_id];
+                if (lut_id) {
+                    get_block_input_nets(lut_id, alm_nets, atom_nlist);
+                    get_block_input_nets(lut_id, alut_nets, atom_nlist);
+                    VTR_LOG("LUT %s (%zu)\n", atom_nlist.block_name(lut_id).c_str(), atom_nlist.block_input_pins(lut_id).size());
+                    if (atom_nlist.block_input_pins(lut_id).size() > 2)
+                        return false;
+                    if (atom_nlist.block_input_pins(lut_id).empty()) {
+                        alm_nets.insert((AtomNetId)0);
+                        alut_nets.insert((AtomNetId)0);
+                    }
+                } else {
+                    auto port_id = atom_nlist.find_atom_port(block_id, connection->to_pin->port->model_port);
+                    if (port_id) {
+                        auto net_id = atom_nlist.port_net(port_id, connection->to_pin->pin_number);
+                        if (net_id) {
+                            alm_nets.insert(net_id);
+                            alut_nets.insert(net_id);
+                        }
+                    }
+                }
+            }
+            connection = connection->next;
+        }
+
+        if (alm_nets.empty())
+            break;
+
+        print_nets(alm_nets, alm_placement_index, alut_placement_index, atom_nlist);
+        // go to the next pattern block if it is still in the same ALM
+        connection = pattern_block->connections;
+        bool found_to_block = false;
+        while (connection) {
+            if (connection->from_block == pattern_block && connection->to_pin->port->model_port == cin_port_model) {
+                auto alm_new_placement_index = get_pb_placement_index(connection->to_block, alm_name);
+                auto alut_new_placement_index = get_pb_placement_index(connection->to_block, alut_name);
+                if (alm_placement_index != alm_new_placement_index) {
+                    if (alm_nets.size() > ALM_INPUTS || alut_nets.size() > 4) {
+                        print_nets(alm_nets, alm_placement_index, alut_placement_index, atom_nlist);
+                        modify_molecule(molecule, pattern_block, atom_nlist);
+                        return check_alm_input_limitation(molecule, atom_nlist);
+                    }
+                    alut_nets.clear();
+                    alm_nets.clear();
+                    alm_placement_index = alm_new_placement_index;
+                    alut_placement_index = alut_new_placement_index;
+                } else if (alut_placement_index != alut_new_placement_index) {
+                    if (alut_nets.size() > 4) {
+                        print_nets(alm_nets, alm_placement_index, alut_placement_index, atom_nlist);
+                        modify_molecule(molecule, pattern_block, atom_nlist);
+                        return check_alm_input_limitation(molecule, atom_nlist);
+                    }
+                    alut_nets.clear();
+                    alut_placement_index = alut_new_placement_index;
+                }
+                pattern_block = connection->to_block;
+                block_id = molecule->atom_block_ids[pattern_block->block_id];
+                found_to_block = true;
+                break;
+            }
+            connection = connection->next;
+        }
+
+        if (!found_to_block) {
+            if (alm_nets.size() > ALM_INPUTS || alut_nets.size() > 4) {
+                print_nets(alm_nets, alm_placement_index, alut_placement_index, atom_nlist);
+                modify_molecule(molecule, pattern_block, atom_nlist);
+                return check_alm_input_limitation(molecule, atom_nlist);
+            }
+            break;
+        }
+    }
+
+    return true;
+}
+
+static void get_block_input_nets(const AtomBlockId block_id,
+                                 std::unordered_set<AtomNetId>& nets,
+                                 const AtomNetlist& atom_nlist) {
+    for (const auto& pin_id : atom_nlist.block_input_pins(block_id)) {
+        nets.insert(atom_nlist.pin_net(pin_id));
+    }
+}
+
+static int get_pb_placement_index(t_pack_pattern_block* pattern_block, std::string pb_name) {
+    auto connection = pattern_block->connections;
+
+    while (connection) {
+        if (connection->to_block == pattern_block)
+            break;
+        connection = connection->next;
+    }
+
+    // Some pattern blocks (e.g. roots) may not have an incoming
+    // connection in the pack pattern. In that case, we cannot infer
+    // a meaningful placement index; return -1 to indicate "unknown".
+    if (!connection)
+        return -1;
+
+    auto input_pin = connection->to_pin;
+    auto parent_node = input_pin->parent_node;
+
+    std::string parent_name(parent_node->pb_type->name);
+
+    while (parent_node && parent_name != pb_name) {
+        parent_node = parent_node->parent_pb_graph_node;
+        if (!parent_node)
+            break;
+        std::string name(parent_node->pb_type->name);
+        parent_name = name;
+    }
+
+    // VTR_ASSERT(parent_node);
+    if (!parent_node)
+        return -1;
+    return parent_node->placement_index;
+}
+
+static void modify_molecule(t_pack_molecule* molecule,
+                            t_pack_pattern_block* pattern_block,
+                            const AtomNetlist& atom_nlist) {
+    auto cin_pin = molecule->pack_pattern->chain_root_pins[0][0];
+    auto cin_port = cin_pin->port;
+    auto cin_port_model = cin_port->model_port;
+
+    auto connection = pattern_block->connections;
+    bool node_removed = false;
+
+    while (true) {
+        connection = pattern_block->connections;
+        // get the unique net ids feeding the adders
+        while (connection) {
+            if (connection->to_block == pattern_block && connection->to_pin->port->model_port != cin_port_model) {
+                auto& lut_id = molecule->atom_block_ids[connection->from_block->block_id];
+                if (lut_id && atom_nlist.block_input_pins(lut_id).size() > 1) {
+                    molecule->atom_block_ids[connection->from_block->block_id] = AtomBlockId::INVALID();
+                    node_removed = true;
+                    break;
+                }
+            }
+            connection = connection->next;
+        }
+        if (node_removed)
+            return;
+
+        connection = pattern_block->connections;
+        bool found_from_block = false;
+        while (connection) {
+            if (connection->to_block == pattern_block && connection->to_pin->port->model_port == cin_port_model) {
+                pattern_block = connection->from_block;
+                found_from_block = true;
+                break;
+            }
+            connection = connection->next;
+        }
+        VTR_ASSERT(found_from_block);
+    }
+}
+
+static bool check_lut_chain_molecules(t_pack_molecule* molecule, const AtomNetlist& atom_nlist) {
+    std::string pattern_name(molecule->pack_pattern->name);
+    if (pattern_name.find("lut_chain") == std::string::npos) return true;
+
+    auto pattern_block = molecule->pack_pattern->root_block;
+    auto cin_pin = molecule->pack_pattern->chain_root_pins[0][0];
+    auto cin_port = cin_pin->port;
+    auto cin_port_model = cin_port->model_port;
+
+    auto connection = pattern_block->connections;
+    t_pb_type* lut_pb_type = nullptr;
+
+    while (connection) {
+        if (connection->to_block == pattern_block && connection->to_pin->port->model_port != cin_port_model) {
+            lut_pb_type = connection->from_pin->parent_node->pb_type;
+            break;
+        }
+        connection = connection->next;
+    }
+
+    VTR_ASSERT(lut_pb_type);
+
+    std::queue<t_pack_pattern_block*> pattern_block_queue;
+    pattern_block_queue.push(pattern_block);
+
+    std::vector<bool> visited_blocks(molecule->num_blocks);
+
+    // do breadth first search to find the block that matches block_id
+    while (!pattern_block_queue.empty()) {
+        pattern_block = pattern_block_queue.front();
+        pattern_block_queue.pop();
+
+        // ignore if a nullptr or is already visited
+        if (!pattern_block || visited_blocks[pattern_block->block_id])
+            continue;
+
+        if (molecule->atom_block_ids[pattern_block->block_id] && pattern_block->pb_type == lut_pb_type)
+            return true;
+
+        visited_blocks[pattern_block->block_id] = true;
+
+        auto block_connections = pattern_block->connections;
+
+        // add all the blocks in the list of connections to the queue
+        while (block_connections) {
+            pattern_block_queue.push(block_connections->from_block);
+            pattern_block_queue.push(block_connections->to_block);
+            block_connections = block_connections->next;
+        }
+    }
+
+    VTR_LOG("check_lut_chain_molecules: Failed for pattern %s. Dump of primitives found:\n", pattern_name.c_str());
+
+    // Re-initialize for printing
+    std::fill(visited_blocks.begin(), visited_blocks.end(), false);
+    while (!pattern_block_queue.empty())
+        pattern_block_queue.pop();
+    pattern_block_queue.push(molecule->pack_pattern->root_block);
+
+    while (!pattern_block_queue.empty()) {
+        pattern_block = pattern_block_queue.front();
+        pattern_block_queue.pop();
+
+        if (!pattern_block || visited_blocks[pattern_block->block_id])
+            continue;
+
+        visited_blocks[pattern_block->block_id] = true;
+
+        if (molecule->atom_block_ids[pattern_block->block_id]) {
+            VTR_LOG("  Block ID: %zu, Name: %s, Type: %s\n",
+                    size_t(molecule->atom_block_ids[pattern_block->block_id]),
+                    atom_nlist.block_name(molecule->atom_block_ids[pattern_block->block_id]).c_str(),
+                    pattern_block->pb_type->name);
+        }
+
+        auto block_connections = pattern_block->connections;
+        while (block_connections) {
+            pattern_block_queue.push(block_connections->from_block);
+            pattern_block_queue.push(block_connections->to_block);
+            block_connections = block_connections->next;
+        }
+    }
+
+    return false;
+}

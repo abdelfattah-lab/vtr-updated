@@ -21,7 +21,9 @@
 #include "vtr_range.h"
 #include "vtr_strong_id.h"
 #include "vtr_vector.h"
+#include "vtr_vector.h"
 #include "vtr_vector_map.h"
+#include "vtr_log.h"
 
 class Prepacker;
 class t_intra_cluster_placement_stats;
@@ -449,10 +451,12 @@ public:
         // assigned a cluster if it does not have an entry in the map or if the
         // ID of the cluster it is assigned to is invalid.
         const auto iter = molecule_cluster_.find(mol);
-        if (iter == molecule_cluster_.end())
+        if (iter == molecule_cluster_.end()) {
             return false;
-        if (!iter->second.is_valid())
+        }
+        if (!iter->second.is_valid()) {
             return false;
+        }
         return true;
     }
 

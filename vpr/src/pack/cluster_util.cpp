@@ -1,5 +1,7 @@
 #include "cluster_util.h"
+
 #include <algorithm>
+#include <cstring>
 #include <unordered_set>
 
 #include "PreClusterTimingGraphResolver.h"
@@ -71,6 +73,83 @@ static void echo_clusters(char* filename, const ClusterLegalizer& cluster_legali
     fclose(fp);
 }
 
+void echo_chain_clusters(const char* filename,
+                        const ClusterLegalizer& cluster_legalizer,
+                        const Prepacker& prepacker) {
+    FILE* fp;
+    fp = vtr::fopen(filename, "w");
+
+    fprintf(fp, "--------------------------------------------------------------\n");
+    fprintf(fp, "Chain Molecules and their Clusters\n");
+    fprintf(fp, "--------------------------------------------------------------\n");
+    fprintf(fp, "\n");
+
+    auto& atom_ctx = g_vpr_ctx.atom();
+
+    // Map to group chain molecules by their cluster
+    std::map<LegalizationClusterId, std::vector<t_pack_molecule*>> cluster_chains;
+
+    // Get all molecules and check if they are chains
+    std::vector<t_pack_molecule*> molecules = prepacker.get_molecules_vector();
+
+    for (t_pack_molecule* molecule : molecules) {
+        if (molecule->is_chain()) {
+            // Get the cluster ID from the root atom of the molecule
+            AtomBlockId root_atom = molecule->atom_block_ids[molecule->root];
+            LegalizationClusterId cluster_id = cluster_legalizer.get_atom_cluster(root_atom);
+
+            if (cluster_id.is_valid()) {
+                cluster_chains[cluster_id].push_back(molecule);
+            }
+        }
+    }
+
+    // Output chains grouped by cluster
+    fprintf(fp, "Summary: Found %zu clusters containing chain molecules\n\n", cluster_chains.size());
+
+    for (auto& cluster_chain_pair : cluster_chains) {
+        LegalizationClusterId cluster_id = cluster_chain_pair.first;
+        const std::vector<t_pack_molecule*>& chains = cluster_chain_pair.second;
+
+        const std::string& cluster_name = cluster_legalizer.get_cluster_pb(cluster_id)->name;
+        fprintf(fp, "Cluster %s (Id: %zu) contains %zu chain molecule(s):\n",
+                cluster_name.c_str(), size_t(cluster_id), chains.size());
+
+        for (t_pack_molecule* chain : chains) {
+            AtomBlockId root_atom = chain->atom_block_ids[chain->root];
+            const std::string& root_name = atom_ctx.nlist.block_name(root_atom);
+
+            fprintf(fp, "  Chain Molecule (root: %s):\n", root_name.c_str());
+            fprintf(fp, "    - Pattern: %s\n", chain->pack_pattern->name);
+            fprintf(fp, "    - Number of atoms: %d\n", chain->num_blocks);
+
+            if (chain->chain_info) {
+                fprintf(fp, "    - Chain ID: %d\n", chain->chain_info->chain_id);
+                fprintf(fp, "    - Is long chain: %s\n", chain->chain_info->is_long_chain ? "Yes" : "No");
+            }
+
+            fprintf(fp, "    - Atoms in chain (with physical location):\n");
+            for (const AtomBlockId& atom_id : chain->atom_block_ids) {
+                if (atom_id.is_valid()) {
+                    const std::string& atom_name = atom_ctx.nlist.block_name(atom_id);
+                    // Get the physical block (pb) location for this atom
+                    const t_pb* atom_pb = atom_ctx.lookup.atom_pb(atom_id);
+                    if (atom_pb) {
+                        std::string pb_location = atom_pb->hierarchical_type_name();
+                        fprintf(fp, "        %s -> %s\n", atom_name.c_str(), pb_location.c_str());
+                    } else {
+                        fprintf(fp, "        %s -> [location not yet assigned]\n", atom_name.c_str());
+                    }
+                }
+            }
+            fprintf(fp, "\n");
+        }
+        fprintf(fp, "\n");
+    }
+
+    fclose(fp);
+}
+
 void calc_init_packing_timing(const t_packer_opts& packer_opts,
                               const t_analysis_opts& analysis_opts,
                               const Prepacker& prepacker,
@@ -129,6 +208,7 @@ void free_clustering_data(t_clustering_data& clustering_data) {
 }
 
 void check_and_output_clustering(ClusterLegalizer& cluster_legalizer,
+                                 const Prepacker& prepacker,
                                  const t_packer_opts& packer_opts,
                                  const std::unordered_set<AtomNetId>& is_clock,
                                  const t_arch* arch) {
@@ -136,6 +216,10 @@ void check_and_output_clustering(ClusterLegalizer& cluster_legalizer,
 
     if (getEchoEnabled() && isEchoFileEnabled(E_ECHO_CLUSTERS)) {
         echo_clusters(getEchoFileName(E_ECHO_CLUSTERS), cluster_legalizer);
+    }
+
+    if (getEchoEnabled() && isEchoFileEnabled(E_ECHO_CHAIN_CLUSTERS)) {
+        echo_chain_clusters(getEchoFileName(E_ECHO_CHAIN_CLUSTERS), cluster_legalizer, prepacker);
     }
 
     output_clustering(&cluster_legalizer,
@@ -172,8 +256,7 @@ void print_pack_status(int tot_num_molecules,
 
     int num_clusters_created = cluster_legalizer.clusters().size();
 
-    if (mols_since_last_print >= int_molecule_increment ||
-        num_molecules_processed == tot_num_molecules) {
+    if (mols_since_last_print >= int_molecule_increment || num_molecules_processed == tot_num_molecules) {
         VTR_LOG(
             "%6d/%-6d  %3d%%   "
             "%26d   "
@@ -199,7 +282,6 @@ void print_pack_status(int tot_num_molecules,
 
 void rebuild_attraction_groups(AttractionInfo& attraction_groups,
                                const ClusterLegalizer& cluster_legalizer) {
-
     for (int igroup = 0; igroup < attraction_groups.num_attraction_groups(); igroup++) {
         AttractGroupId group_id(igroup);
         AttractionGroup& group = attraction_groups.get_attraction_group_info(group_id);
@@ -344,7 +426,7 @@ void alloc_and_init_clustering(const t_molecule_stats& max_molecule_stats,
     std::stable_sort(molecules_vector.begin(),
                      molecules_vector.end(),
                      [](t_pack_molecule* a, t_pack_molecule* b) {
-                        return a->base_gain < b->base_gain;
+                         return a->base_gain < b->base_gain;
                      });
 
     clustering_data.memory_pool = new t_molecule_link[num_molecules];
@@ -371,7 +453,6 @@ t_pack_molecule* get_molecule_by_num_ext_inputs(const int ext_inps,
                                                 t_molecule_link* unclustered_list_head,
                                                 LegalizationClusterId legalization_cluster_id,
                                                 const ClusterLegalizer& cluster_legalizer) {
-
     t_molecule_link* prev_ptr = &unclustered_list_head[ext_inps];
     t_molecule_link* ptr = unclustered_list_head[ext_inps].next;
     while (ptr != nullptr) {
@@ -572,7 +653,6 @@ void mark_and_update_partial_gain(const AtomNetId net_id,
                                   const std::unordered_set<AtomNetId>& is_global,
                                   const int high_fanout_net_threshold,
                                   const std::unordered_set<AtomNetId>& net_output_feeds_driving_block_input) {
-
     const AtomContext& atom_ctx = g_vpr_ctx.atom();
     t_pb* cur_pb = atom_ctx.lookup.atom_pb(clustered_blk_id)->parent_pb;
     cur_pb = get_top_level_pb(cur_pb);
@@ -716,7 +796,6 @@ void update_cluster_stats(const t_pack_molecule* molecule,
                           const SetupTimingInfo& timing_info,
                           AttractionInfo& attraction_groups,
                           const std::unordered_set<AtomNetId>& net_output_feeds_driving_block_input) {
-
     int molecule_size;
     int iblock;
     t_pb *cur_pb, *cb;
@@ -872,6 +951,7 @@ t_pack_molecule* get_highest_gain_molecule(t_pb* cur_pb,
                                                                        feasible_block_array_size,
                                                                        attraction_groups);
         }
+
     } else { //Reverse order
         // 3. Find unpacked molecules based on weak connectedness (connected by high fanout nets) with current cluster
         if (cur_pb->pb_stats->num_feasible_blocks == 0 && cur_pb->pb_stats->tie_break_high_fanout_net) {
@@ -906,6 +986,7 @@ t_pack_molecule* get_highest_gain_molecule(t_pb* cur_pb,
                                                             legalization_cluster_id,
                                                             primitive_candidate_block_types);
     }
+
     /* Grab highest gain molecule */
     t_pack_molecule* molecule = nullptr;
     if (cur_pb->pb_stats->num_feasible_blocks > 0) {
@@ -933,6 +1014,10 @@ void add_cluster_molecule_candidates_by_connectivity_and_timing(t_pb* cur_pb,
     for (AtomBlockId blk_id : cur_pb->pb_stats->marked_blocks) {
         if (!cluster_legalizer.is_atom_clustered(blk_id)) {
             t_pack_molecule* molecule = prepacker.get_atom_molecule(blk_id);
+            if (!molecule) {
+                continue;
+            }
+
             if (!cluster_legalizer.is_mol_clustered(molecule)) {
                 if (cluster_legalizer.is_molecule_compatible(molecule, legalization_cluster_id)) {
                     add_molecule_to_pb_stats_candidates(molecule,
@@ -1134,7 +1219,6 @@ t_pack_molecule* get_molecule_for_cluster(t_pb* cur_pb,
      * input, clock and capacity constraints of a cluster that are
      * passed in.  If no suitable block is found it returns nullptr.
      */
-
     VTR_ASSERT(cur_pb->is_root());
 
     /* If cannot pack into primitive, try packing into cluster */
@@ -1413,6 +1497,69 @@ size_t update_pb_type_count(const t_pb* pb, std::map<t_pb_type*, int>& pb_type_c
     return max_depth;
 }
 
+static void count_arithmetic_modes_recurr(const t_pb* pb,
+                                          int& num_arith_1chain,
+                                          int& num_arith_2chains) {
+    if (pb == nullptr || pb->pb_graph_node == nullptr) {
+        return;
+    }
+
+    t_pb_graph_node* pb_graph_node = pb->pb_graph_node;
+    t_pb_type* pb_type = pb_graph_node->pb_type;
+
+    if (pb_type && pb_type->num_modes > 0 && pb->mode >= 0 && pb->mode < pb_type->num_modes) {
+        t_mode* mode = &pb_type->modes[pb->mode];
+
+        // For Stratix-10 style architectures, the 'ble5' pb_type has modes
+        // 'arithmetic_1chain' and 'arithmetic_2chains'. We track how many
+        // instances of each mode are used.
+        if (std::strcmp(pb_type->name, "ble5") == 0) {
+            if (std::strcmp(mode->name, "arithmetic_1chain") == 0) {
+                num_arith_1chain++;
+            } else if (std::strcmp(mode->name, "arithmetic_2chains") == 0) {
+                num_arith_2chains++;
+            }
+        }
+
+        // Recurse on children following the selected mode
+        for (int ichild_type = 0; ichild_type < mode->num_pb_type_children; ++ichild_type) {
+            if (!pb->child_pbs[ichild_type]) continue;
+
+            t_pb_type* child_type = &mode->pb_type_children[ichild_type];
+            for (int ichild = 0; ichild < child_type->num_pb; ++ichild) {
+                if (pb->child_pbs[ichild_type][ichild].name) {
+                    count_arithmetic_modes_recurr(&pb->child_pbs[ichild_type][ichild],
+                                                  num_arith_1chain,
+                                                  num_arith_2chains);
+                }
+            }
+        }
+    }
+}
+
+void print_arithmetic_mode_usage(const ClusteredNetlist& clb_nlist) {
+    int num_arith_1chain = 0;
+    int num_arith_2chains = 0;
+
+    for (ClusterBlockId blk : clb_nlist.blocks()) {
+        const t_pb* pb = clb_nlist.block_pb(blk);
+        count_arithmetic_modes_recurr(pb, num_arith_1chain, num_arith_2chains);
+    }
+
+    if (num_arith_1chain == 0 && num_arith_2chains == 0) {
+        return;
+    }
+
+    VTR_LOG("Arithmetic modes usage (ble5):\n");
+    if (num_arith_1chain > 0) {
+        VTR_LOG("  arithmetic_1chain : %d\n", num_arith_1chain);
+    }
+    if (num_arith_2chains > 0) {
+        VTR_LOG("  arithmetic_2chains : %d\n", num_arith_2chains);
+    }
+    VTR_LOG("\n");
+}
+
 void print_pb_type_count_recurr(t_pb_type* pb_type, size_t max_name_chars, size_t curr_depth, std::map<t_pb_type*, int>& pb_type_count) {
     std::string display_name(curr_depth, ' '); //Indent by depth
     display_name += pb_type->name;
@@ -1456,6 +1603,11 @@ void print_pb_type_count(const ClusteredNetlist& clb_nlist) {
         print_pb_type_count_recurr(logical_block_type.pb_type, max_pb_type_name_chars + max_depth, 0, pb_type_count);
     }
     VTR_LOG("\n");
+
+    // Additional Stratix-10 style reporting: show how many BLEs are using
+    // the arithmetic_1chain vs arithmetic_2chains modes (i.e. one vs two
+    // carry chains in the arithmetic mode).
+    print_arithmetic_mode_usage(clb_nlist);
 }
 
 t_logical_block_type_ptr identify_logic_block_type(const std::map<const t_model*, std::vector<t_logical_block_type_ptr>>& primitive_candidate_block_types) {

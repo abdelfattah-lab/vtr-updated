@@ -100,9 +100,17 @@ void free_clustering_data(t_clustering_data& clustering_data);
  * @brief Check clustering legality and output it.
  */
 void check_and_output_clustering(ClusterLegalizer& cluster_legalizer,
+                                 const Prepacker& prepacker,
                                  const t_packer_opts& packer_opts,
                                  const std::unordered_set<AtomNetId>& is_clock,
                                  const t_arch* arch);
+
+/*
+ * @brief Output which chains are in which clusters to an echo file.
+ */
+void echo_chain_clusters(const char* filename,
+                        const ClusterLegalizer& cluster_legalizer,
+                        const Prepacker& prepacker);
 
 /*
  * @brief Determine if atom block is in pb.
@@ -391,6 +399,15 @@ std::unordered_set<AtomNetId> identify_net_output_feeds_driving_block_input(cons
  *        the number of used pb_types in the given packed cluster t_pb
  */
 size_t update_pb_type_count(const t_pb* pb, std::map<t_pb_type*, int>& pb_type_count, size_t depth);
+
+/**
+ * @brief Print usage statistics for arithmetic BLE modes (arithmetic_1chain /
+ *        arithmetic_2chains) when present in the architecture.
+ *
+ * Intended for Stratix-10 style architectures where the 'ble5' pb_type has
+ * modes named 'arithmetic_1chain' and 'arithmetic_2chains'.
+ */
+void print_arithmetic_mode_usage(const ClusteredNetlist& clb_nlist);
 
 /*
  * @brief This function updates the le_count data structure from the given
