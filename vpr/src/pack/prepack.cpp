@@ -941,10 +941,25 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
 
                             cin_driver_net = atom_nlist.port_net(prev_cout_port, 0);
                             if (!cin_driver_net) {
-                                // Create net if missing - use block name (VPR convention)
-                                std::string net_name = atom_nlist.block_name(prev_blk);
+                                // Create net if missing
+                                // COUT net names use [0] suffix, while block names often use [1] for sumout variant
+                                // We need to create a unique COUT net name to avoid collision with SUMOUT net
+                                std::string block_name = atom_nlist.block_name(prev_blk);
+                                std::string net_name;
+                                // Replace trailing [1] with [0] for COUT net naming convention
+                                if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[1]") {
+                                    net_name = block_name.substr(0, block_name.size() - 3) + "[0]";
+                                } else if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[0]") {
+                                    net_name = block_name; // Already has [0] suffix
+                                } else {
+                                    net_name = block_name + "_cout"; // Fallback for unusual naming
+                                }
                                 cin_driver_net = atom_nlist.create_net(net_name);
-                                atom_nlist.create_pin(prev_cout_port, 0, cin_driver_net, PinType::DRIVER, false);
+                                // Only add driver pin if net doesn't already have one
+                                // (create_net may return an existing net with the same name)
+                                if (!atom_nlist.net_driver(cin_driver_net)) {
+                                    atom_nlist.create_pin(prev_cout_port, 0, cin_driver_net, PinType::DRIVER, false);
+                                }
                             }
                         }
 
@@ -961,10 +976,21 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
 
                         // Create and Connect COUT Net only if COUT port exists (has downstream block)
                         if (cout_port_id) {
-                            // Follow VPR convention: name the COUT net the same as the block name
-                            std::string cout_net_name = atom_nlist.block_name(new_blk_id);
+                            // COUT net names use [0] suffix convention
+                            std::string block_name = atom_nlist.block_name(new_blk_id);
+                            std::string cout_net_name;
+                            if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[1]") {
+                                cout_net_name = block_name.substr(0, block_name.size() - 3) + "[0]";
+                            } else if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[0]") {
+                                cout_net_name = block_name;
+                            } else {
+                                cout_net_name = block_name + "_cout";
+                            }
                             AtomNetId cout_net = atom_nlist.create_net(cout_net_name);
-                            atom_nlist.create_pin(cout_port_id, 0, cout_net, PinType::DRIVER, false);
+                            // Only add driver pin if net doesn't already have one
+                            if (!atom_nlist.net_driver(cout_net)) {
+                                atom_nlist.create_pin(cout_port_id, 0, cout_net, PinType::DRIVER, false);
+                            }
 
                             // Rewire the next block in the chain if it exists and is occupied
                             // The chain flows from row1_idx to row1_idx - 1
@@ -1061,10 +1087,25 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
 
                             cin_driver_net = atom_nlist.port_net(prev_cout_port, 0);
                             if (!cin_driver_net) {
-                                // Create net if missing - use block name (VPR convention)
-                                std::string net_name = atom_nlist.block_name(prev_blk);
+                                // Create net if missing
+                                // COUT net names use [0] suffix, while block names often use [1] for sumout variant
+                                // We need to create a unique COUT net name to avoid collision with SUMOUT net
+                                std::string block_name = atom_nlist.block_name(prev_blk);
+                                std::string net_name;
+                                // Replace trailing [1] with [0] for COUT net naming convention
+                                if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[1]") {
+                                    net_name = block_name.substr(0, block_name.size() - 3) + "[0]";
+                                } else if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[0]") {
+                                    net_name = block_name; // Already has [0] suffix
+                                } else {
+                                    net_name = block_name + "_cout"; // Fallback for unusual naming
+                                }
                                 cin_driver_net = atom_nlist.create_net(net_name);
-                                atom_nlist.create_pin(prev_cout_port, 0, cin_driver_net, PinType::DRIVER, false);
+                                // Only add driver pin if net doesn't already have one
+                                // (create_net may return an existing net with the same name)
+                                if (!atom_nlist.net_driver(cin_driver_net)) {
+                                    atom_nlist.create_pin(prev_cout_port, 0, cin_driver_net, PinType::DRIVER, false);
+                                }
                             }
                         }
 
@@ -1081,10 +1122,21 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
 
                         // Create and Connect COUT Net only if COUT port exists (has downstream block)
                         if (cout_port_id) {
-                            // Follow VPR convention: name the COUT net the same as the block name
-                            std::string cout_net_name = atom_nlist.block_name(new_blk_id);
+                            // COUT net names use [0] suffix convention
+                            std::string block_name = atom_nlist.block_name(new_blk_id);
+                            std::string cout_net_name;
+                            if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[1]") {
+                                cout_net_name = block_name.substr(0, block_name.size() - 3) + "[0]";
+                            } else if (block_name.size() >= 3 && block_name.substr(block_name.size() - 3) == "[0]") {
+                                cout_net_name = block_name;
+                            } else {
+                                cout_net_name = block_name + "_cout";
+                            }
                             AtomNetId cout_net = atom_nlist.create_net(cout_net_name);
-                            atom_nlist.create_pin(cout_port_id, 0, cout_net, PinType::DRIVER, false);
+                            // Only add driver pin if net doesn't already have one
+                            if (!atom_nlist.net_driver(cout_net)) {
+                                atom_nlist.create_pin(cout_port_id, 0, cout_net, PinType::DRIVER, false);
+                            }
 
                             // Rewire the next block in the chain if it exists and is occupied
                             // Row 0 chain flows forward: 0 → 1 → 2 → ... → 19

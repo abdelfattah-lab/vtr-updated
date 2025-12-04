@@ -79,6 +79,7 @@
 
 #include "timing_graph_builder.h"
 #include "timing_reports.h"
+#include "prepack.h"
 #include "tatum/echo_writer.hpp"
 
 #include "read_route.h"
@@ -701,6 +702,26 @@ void vpr_load_packing(t_vpr_setup& vpr_setup, const t_arch& arch) {
 
     auto& cluster_ctx = g_vpr_ctx.mutable_clustering();
     const AtomContext& atom_ctx = g_vpr_ctx.atom();
+    const DeviceContext& device_ctx = g_vpr_ctx.device();
+
+    // Run prepacking to create any pass-through atoms that may have been added
+    // during the original packing. These atoms exist in the .net file but not
+    // in the original .blif, so we need to recreate them before loading.
+    // The molecules created here are not used (we already have the packed result),
+    // but the atoms and nets must exist in the atom netlist for .net validation.
+    VTR_LOG("Running prepacker to recreate pass-through atoms...\n");
+    Prepacker prepacker;
+    prepacker.init(atom_ctx.nlist, device_ctx.logical_block_types);
+
+    // Rebuild timing graph to reflect any netlist modifications from prepacking
+    if (vpr_setup.TimingEnabled) {
+        auto& timing_ctx = g_vpr_ctx.mutable_timing();
+        auto& mutable_atom_ctx = g_vpr_ctx.mutable_atom();
+
+        VTR_LOG("Rebuilding timing graph after prepacking.\n");
+        timing_ctx.graph = TimingGraphBuilder(mutable_atom_ctx.nlist, mutable_atom_ctx.lookup)
+                               .timing_graph(/*allow_dangling_combinational_nodes=*/true);
+    }
 
     /* Ensure we have a clean start with void net remapping information */
     cluster_ctx.post_routing_clb_pin_nets.clear();

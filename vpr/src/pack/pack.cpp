@@ -8,6 +8,7 @@
 #include "greedy_clusterer.h"
 #include "pack.h"
 #include "prepack.h"
+#include "timing_graph_builder.h"
 #include "vpr_context.h"
 #include "vpr_error.h"
 #include "vpr_types.h"
@@ -60,6 +61,23 @@ bool try_pack(t_packer_opts* packer_opts,
     VTR_LOG("Begin prepacking.\n");
     Prepacker prepacker;
     prepacker.init(atom_ctx.nlist, device_ctx.logical_block_types);
+
+    // Prepacking may have modified the atom netlist (e.g., fill_vacant_chain_spots
+    // creates pass-through atoms and rewires connections). If timing-driven packing
+    // is enabled, we need to rebuild the timing graph to reflect these changes.
+    // The timing graph was originally built before packing started, so it would
+    // be stale after prepacking modifications.
+    if (packer_opts->timing_driven) {
+        auto& timing_ctx = g_vpr_ctx.mutable_timing();
+        auto& mutable_atom_ctx = g_vpr_ctx.mutable_atom();
+
+        VTR_LOG("Rebuilding timing graph after prepacking modifications.\n");
+        timing_ctx.graph = TimingGraphBuilder(mutable_atom_ctx.nlist, mutable_atom_ctx.lookup)
+                               .timing_graph(/*allow_dangling_combinational_nodes=*/true);
+        VTR_LOG("  Timing Graph Nodes: %zu\n", timing_ctx.graph->nodes().size());
+        VTR_LOG("  Timing Graph Edges: %zu\n", timing_ctx.graph->edges().size());
+        VTR_LOG("  Timing Graph Levels: %zu\n", timing_ctx.graph->levels().size());
+    }
 
     /* We keep attraction groups off in the first iteration,  and
      * only turn on in later iterations if some floorplan regions turn out to be overfull.

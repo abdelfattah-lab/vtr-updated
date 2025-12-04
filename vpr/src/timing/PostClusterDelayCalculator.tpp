@@ -260,6 +260,44 @@ inline tatum::Time PostClusterDelayCalculator::atom_net_delay(const tatum::Timin
                 int src_pb_route_id = src_gpin->pin_count_in_cluster;
                 int sink_pb_route_id = sink_gpin->pin_count_in_cluster;
 
+                // DEBUG: Print details before assertion
+                auto& atom_ctx = g_vpr_ctx.atom();
+                AtomNetId pb_route_src_net = cluster_ctx.clb_nlist.block_pb(clb_src_block)->pb_route[src_pb_route_id].atom_net_id;
+                AtomNetId pb_route_sink_net = cluster_ctx.clb_nlist.block_pb(clb_sink_block)->pb_route[sink_pb_route_id].atom_net_id;
+
+                if (pb_route_src_net != atom_net) {
+                    VTR_LOG("\n=== PB_ROUTE MISMATCH DEBUG ===\n");
+                    VTR_LOG("Source atom: %s (ID: %zu)\n", atom_ctx.nlist.block_name(atom_src_block).c_str(), size_t(atom_src_block));
+                    VTR_LOG("Source pin: %zu (%s)\n", size_t(atom_src_pin), atom_ctx.nlist.pin_name(atom_src_pin).c_str());
+                    VTR_LOG("Expected atom_net: %zu (%s)\n", size_t(atom_net), atom_ctx.nlist.net_name(atom_net).c_str());
+                    VTR_LOG("pb_route[%d].atom_net_id: %zu (%s)\n", src_pb_route_id, size_t(pb_route_src_net),
+                            pb_route_src_net.is_valid() ? atom_ctx.nlist.net_name(pb_route_src_net).c_str() : "INVALID");
+                    VTR_LOG("Cluster: %zu\n", size_t(clb_src_block));
+
+                    // DIAGNOSTIC: Check what the atom netlist says about this net
+                    VTR_LOG("\n--- Atom Netlist Info for net %zu (%s) ---\n", size_t(atom_net), atom_ctx.nlist.net_name(atom_net).c_str());
+                    AtomPinId net_driver = atom_ctx.nlist.net_driver(atom_net);
+                    if (net_driver) {
+                        AtomBlockId net_driver_blk = atom_ctx.nlist.pin_block(net_driver);
+                        VTR_LOG("Netlist driver: %s (ID: %zu), pin: %s\n",
+                                atom_ctx.nlist.block_name(net_driver_blk).c_str(),
+                                size_t(net_driver_blk),
+                                atom_ctx.nlist.pin_name(net_driver).c_str());
+                    } else {
+                        VTR_LOG("Netlist has NO driver for this net!\n");
+                    }
+                    VTR_LOG("Netlist sinks:\n");
+                    for (auto sink_pin : atom_ctx.nlist.net_sinks(atom_net)) {
+                        AtomBlockId sink_blk = atom_ctx.nlist.pin_block(sink_pin);
+                        VTR_LOG("  - %s (ID: %zu), pin: %s\n",
+                                atom_ctx.nlist.block_name(sink_blk).c_str(),
+                                size_t(sink_blk),
+                                atom_ctx.nlist.pin_name(sink_pin).c_str());
+                    }
+                    VTR_LOG("==========================================\n\n");
+                    VTR_LOG("===============================\n\n");
+                }
+
                 VTR_ASSERT(cluster_ctx.clb_nlist.block_pb(clb_src_block)->pb_route[src_pb_route_id].atom_net_id == atom_net);
                 VTR_ASSERT(cluster_ctx.clb_nlist.block_pb(clb_sink_block)->pb_route[sink_pb_route_id].atom_net_id == atom_net);
 
