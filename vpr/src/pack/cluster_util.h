@@ -100,9 +100,17 @@ void free_clustering_data(t_clustering_data& clustering_data);
  * @brief Check clustering legality and output it.
  */
 void check_and_output_clustering(ClusterLegalizer& cluster_legalizer,
+                                 const Prepacker& prepacker,
                                  const t_packer_opts& packer_opts,
                                  const std::unordered_set<AtomNetId>& is_clock,
                                  const t_arch* arch);
+
+/*
+ * @brief Output which chains are in which clusters to an echo file.
+ */
+void echo_chain_clusters(const char* filename,
+                        const ClusterLegalizer& cluster_legalizer,
+                        const Prepacker& prepacker);
 
 /*
  * @brief Determine if atom block is in pb.

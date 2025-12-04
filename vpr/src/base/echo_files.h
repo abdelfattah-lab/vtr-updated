@@ -15,6 +15,7 @@ enum e_echo_files {
 
     //Packing
     E_ECHO_CLUSTERS,
+    E_ECHO_CHAIN_CLUSTERS,
 
     //Legalizer
     E_ECHO_FLAT_PLACE,

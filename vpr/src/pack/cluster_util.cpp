@@ -73,6 +73,83 @@ static void echo_clusters(char* filename, const ClusterLegalizer& cluster_legali
     fclose(fp);
 }
 
+void echo_chain_clusters(const char* filename,
+                        const ClusterLegalizer& cluster_legalizer,
+                        const Prepacker& prepacker) {
+    FILE* fp;
+    fp = vtr::fopen(filename, "w");
+
+    fprintf(fp, "--------------------------------------------------------------\n");
+    fprintf(fp, "Chain Molecules and their Clusters\n");
+    fprintf(fp, "--------------------------------------------------------------\n");
+    fprintf(fp, "\n");
+
+    auto& atom_ctx = g_vpr_ctx.atom();
+
+    // Map to group chain molecules by their cluster
+    std::map<LegalizationClusterId, std::vector<t_pack_molecule*>> cluster_chains;
+
+    // Get all molecules and check if they are chains
+    std::vector<t_pack_molecule*> molecules = prepacker.get_molecules_vector();
+
+    for (t_pack_molecule* molecule : molecules) {
+        if (molecule->is_chain()) {
+            // Get the cluster ID from the root atom of the molecule
+            AtomBlockId root_atom = molecule->atom_block_ids[molecule->root];
+            LegalizationClusterId cluster_id = cluster_legalizer.get_atom_cluster(root_atom);
+
+            if (cluster_id.is_valid()) {
+                cluster_chains[cluster_id].push_back(molecule);
+            }
+        }
+    }
+
+    // Output chains grouped by cluster
+    fprintf(fp, "Summary: Found %zu clusters containing chain molecules\n\n", cluster_chains.size());
+
+    for (auto& cluster_chain_pair : cluster_chains) {
+        LegalizationClusterId cluster_id = cluster_chain_pair.first;
+        const std::vector<t_pack_molecule*>& chains = cluster_chain_pair.second;
+
+        const std::string& cluster_name = cluster_legalizer.get_cluster_pb(cluster_id)->name;
+        fprintf(fp, "Cluster %s (Id: %zu) contains %zu chain molecule(s):\n",
+                cluster_name.c_str(), size_t(cluster_id), chains.size());
+
+        for (t_pack_molecule* chain : chains) {
+            AtomBlockId root_atom = chain->atom_block_ids[chain->root];
+            const std::string& root_name = atom_ctx.nlist.block_name(root_atom);
+
+            fprintf(fp, "  Chain Molecule (root: %s):\n", root_name.c_str());
+            fprintf(fp, "    - Pattern: %s\n", chain->pack_pattern->name);
+            fprintf(fp, "    - Number of atoms: %d\n", chain->num_blocks);
+
+            if (chain->chain_info) {
+                fprintf(fp, "    - Chain ID: %d\n", chain->chain_info->chain_id);
+                fprintf(fp, "    - Is long chain: %s\n", chain->chain_info->is_long_chain ? "Yes" : "No");
+            }
+
+            fprintf(fp, "    - Atoms in chain (with physical location):\n");
+            for (const AtomBlockId& atom_id : chain->atom_block_ids) {
+                if (atom_id.is_valid()) {
+                    const std::string& atom_name = atom_ctx.nlist.block_name(atom_id);
+                    // Get the physical block (pb) location for this atom
+                    const t_pb* atom_pb = atom_ctx.lookup.atom_pb(atom_id);
+                    if (atom_pb) {
+                        std::string pb_location = atom_pb->hierarchical_type_name();
+                        fprintf(fp, "        %s -> %s\n", atom_name.c_str(), pb_location.c_str());
+                    } else {
+                        fprintf(fp, "        %s -> [location not yet assigned]\n", atom_name.c_str());
+                    }
+                }
+            }
+            fprintf(fp, "\n");
+        }
+        fprintf(fp, "\n");
+    }
+
+    fclose(fp);
+}
+
 void calc_init_packing_timing(const t_packer_opts& packer_opts,
                               const t_analysis_opts& analysis_opts,
                               const Prepacker& prepacker,
@@ -131,6 +208,7 @@ void free_clustering_data(t_clustering_data& clustering_data) {
 }
 
 void check_and_output_clustering(ClusterLegalizer& cluster_legalizer,
+                                 const Prepacker& prepacker,
                                  const t_packer_opts& packer_opts,
                                  const std::unordered_set<AtomNetId>& is_clock,
                                  const t_arch* arch) {
@@ -138,6 +216,10 @@ void check_and_output_clustering(ClusterLegalizer& cluster_legalizer,
 
     if (getEchoEnabled() && isEchoFileEnabled(E_ECHO_CLUSTERS)) {
         echo_clusters(getEchoFileName(E_ECHO_CLUSTERS), cluster_legalizer);
+    }
+
+    if (getEchoEnabled() && isEchoFileEnabled(E_ECHO_CHAIN_CLUSTERS)) {
+        echo_chain_clusters(getEchoFileName(E_ECHO_CHAIN_CLUSTERS), cluster_legalizer, prepacker);
     }
 
     output_clustering(&cluster_legalizer,
