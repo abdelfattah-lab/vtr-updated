@@ -237,8 +237,8 @@ static bool check_cluster_floorplanning(AtomBlockId atom_blk_id,
     // the Cluster's new PartitionRegion.
     if (cluster_pr.empty()) {
         VTR_LOGV(log_verbosity > 3,
-                "\t\t\t Intersect: Atom block %d has floorplanning constraints\n",
-                atom_blk_id);
+                 "\t\t\t Intersect: Atom block %d has floorplanning constraints\n",
+                 atom_blk_id);
         cluster_pr = atom_pr;
         cluster_pr_needs_update = true;
         return true;
@@ -252,8 +252,8 @@ static bool check_cluster_floorplanning(AtomBlockId atom_blk_id,
     // Cluster due to floorplanning constraints.
     if (cluster_pr.empty()) {
         VTR_LOGV(log_verbosity > 3,
-                "\t\t\t Intersect: Atom block %d failed floorplanning check for cluster\n",
-                atom_blk_id);
+                 "\t\t\t Intersect: Atom block %d failed floorplanning check for cluster\n",
+                 atom_blk_id);
         cluster_pr_needs_update = false;
         return false;
     }
@@ -328,8 +328,8 @@ static bool check_cluster_noc_group(AtomBlockId atom_blk_id,
  *        outside the cluster) and returns the status of the placement accordingly.
  */
 static enum e_block_pack_status check_chain_root_placement_feasibility(const t_pb_graph_node* pb_graph_node,
-                                                                const t_pack_molecule* molecule,
-                                                                const AtomBlockId blk_id) {
+                                                                       const t_pack_molecule* molecule,
+                                                                       const AtomBlockId blk_id) {
     const AtomContext& atom_ctx = g_vpr_ctx.atom();
 
     enum e_block_pack_status block_pack_status = e_block_pack_status::BLK_PASSED;
@@ -342,6 +342,8 @@ static enum e_block_pack_status check_chain_root_placement_feasibility(const t_p
     AtomNetId chain_net_id;
     auto port_id = atom_ctx.nlist.find_atom_port(blk_id, root_port);
 
+    VTR_LOG("check_chain_root_placement_feasibility: blk_id=%zu molecule=%s pb_graph_node=%s\n", size_t(blk_id), (molecule->pack_pattern ? molecule->pack_pattern->name : "NULL"), pb_graph_node->hierarchical_type_name().c_str());
+
     if (port_id) {
         chain_net_id = atom_ctx.nlist.port_net(port_id, chain_root_pins[0][0]->pin_number);
     }
@@ -352,22 +354,35 @@ static enum e_block_pack_status check_chain_root_placement_feasibility(const t_p
     // cluster might need to start at the top of the cluster as their input can be
     // driven by a global gnd or vdd. Therefore even if this is not a long chain
     // but its input pin is driven by a net, the placement legality is checked.
+    VTR_LOG("check_chain_root_placement_feasibility: is_long_chain=%d chain_net_id=%zu\n", is_long_chain, size_t(chain_net_id));
     if (is_long_chain || chain_net_id) {
         auto chain_id = molecule->chain_info->chain_id;
+        VTR_LOG("check_chain_root_placement_feasibility: chain_id=%d\n", chain_id);
         // if this chain has a chain id assigned to it (implies is_long_chain too)
         if (chain_id != -1) {
             // the chosen primitive should be a valid starting point for the chain
             // long chains should only be placed at the top of the chain tieOff = 0
-            if (pb_graph_node != chain_root_pins[chain_id][0]->parent_node) {
-                VTR_LOG("check_chain_root_placement_feasibility: FAILED - pb_graph_node %s != chain_root_pin parent %s for chain_id %d\n", pb_graph_node->hierarchical_type_name().c_str(), chain_root_pins[chain_id][0]->parent_node->hierarchical_type_name().c_str(), chain_id);
+            bool found = false;
+            for (const auto* pin : chain_root_pins[chain_id]) {
+                VTR_LOG("check_chain_root_placement_feasibility: chain_id=%d pin=%s\n", chain_id, pin->parent_node->hierarchical_type_name().c_str());
+                if (pb_graph_node == pin->parent_node) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                VTR_LOG("check_chain_root_placement_feasibility: FAILED - pb_graph_node %s is not a valid root for chain_id %d\n", pb_graph_node->hierarchical_type_name().c_str(), chain_id);
                 block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
             }
             // the chain doesn't have an assigned chain_id yet
         } else {
-            VTR_LOG("check_chain_root_placement_feasibility: FAILED - No chain_id assigned, checking all chains\n");
+            // VTR_LOG("check_chain_root_placement_feasibility: FAILED - No chain_id assigned, checking all chains\n"); // This log was misleading in the previous snippet as it wasn't necessarily a failure yet
             block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
+            int chain_idx = 0;
             for (const auto& chain : chain_root_pins) {
+                VTR_LOG("  Checking chain %d\n", chain_idx++);
                 for (auto tieOff : chain) {
+                    VTR_LOG("    Checking tieOff: %s\n", tieOff->parent_node->hierarchical_type_name().c_str());
                     // check if this chosen primitive is one of the possible
                     // starting points for this chain.
                     if (pb_graph_node == tieOff->parent_node) {
@@ -377,12 +392,17 @@ static enum e_block_pack_status check_chain_root_placement_feasibility(const t_p
                         break;
                     }
                     // long chains should only be placed at the top of the chain tieOff = 0
-                    if (is_long_chain) break;
+                    // if (is_long_chain) break; // REMOVED: Allow checking all starting points
                 }
+                if (block_pack_status == e_block_pack_status::BLK_PASSED) break;
+            }
+            if (block_pack_status == e_block_pack_status::BLK_FAILED_FEASIBLE) {
+                VTR_LOG("check_chain_root_placement_feasibility: FAILED - pb_graph_node %s is not a valid root for any chain (is_long_chain=%d)\n", pb_graph_node->hierarchical_type_name().c_str(), is_long_chain);
             }
         }
     }
 
+    VTR_LOG("check_chain_root_placement_feasibility: result=%d\n", (int)block_pack_status);
     return block_pack_status;
 }
 
@@ -516,7 +536,7 @@ try_place_atom_block_rec(const t_pb_graph_node* pb_graph_node,
                          t_lb_router_data* router_data,
                          int verbosity,
                          const int feasible_block_array_size) {
-    VTR_LOG("try_place_atom_block_rec: blk_id=%zu molecule=%s pb_graph_node=%s\n", size_t(blk_id), molecule->pack_pattern->name, pb_graph_node->hierarchical_type_name().c_str());
+    VTR_LOG("try_place_atom_block_rec: blk_id=%zu molecule=%s pb_graph_node=%s\n", size_t(blk_id), (molecule->pack_pattern ? molecule->pack_pattern->name : "NULL"), pb_graph_node->hierarchical_type_name().c_str());
     bool is_primitive = pb_graph_node->is_primitive();
     const AtomContext& atom_ctx = g_vpr_ctx.atom();
     AtomContext& mutable_atom_ctx = g_vpr_ctx.mutable_atom();
@@ -861,7 +881,6 @@ static void compute_and_mark_lookahead_pins_used_for_pin(const t_pb_graph_pin* p
     }
 }
 
-
 /*
  * @brief Determine if pins of speculatively packed pb are legal
  */
@@ -919,15 +938,117 @@ static void try_update_lookahead_pins_used(t_pb* cur_pb,
  */
 static bool check_lookahead_pins_used(t_pb* cur_pb, t_ext_pin_util max_external_pin_util) {
     const t_pb_type* pb_type = cur_pb->pb_graph_node->pb_type;
+    const AtomContext& atom_ctx = g_vpr_ctx.atom();
+
+    // Helper to find a primitive pin that maps to the given class at the current block's depth
+    auto find_primitive_pin_for_class = [&](int target_class, bool is_input) -> std::pair<const t_pb*, const t_pb_graph_pin*> {
+        int root_depth = cur_pb->pb_graph_node->pb_type->depth;
+
+        // Recursive lambda
+        std::function<std::pair<const t_pb*, const t_pb_graph_pin*>(const t_pb*)> recurse =
+            [&](const t_pb* pb) -> std::pair<const t_pb*, const t_pb_graph_pin*> {
+            const t_pb_type* type = pb->pb_graph_node->pb_type;
+            if (type->num_modes == 0) { // Primitive
+                // Check pins
+                int num_ports = is_input ? pb->pb_graph_node->num_input_ports : pb->pb_graph_node->num_output_ports;
+                for (int port = 0; port < num_ports; ++port) {
+                    int num_pins = is_input ? pb->pb_graph_node->num_input_pins[port] : pb->pb_graph_node->num_output_pins[port];
+                    for (int pin = 0; pin < num_pins; ++pin) {
+                        const auto& graph_pin = is_input ? pb->pb_graph_node->input_pins[port][pin] : pb->pb_graph_node->output_pins[port][pin];
+                        if (graph_pin.parent_pin_class[root_depth] == target_class) {
+                            // Verify this pin is actually using a net (or driving one)
+                            // For inputs: check if it's connected to a net that drives the class usage
+                            // For now, just return the first match as a representative
+                            return {pb, &graph_pin};
+                        }
+                    }
+                }
+                return {nullptr, nullptr};
+            } else { // Cluster
+                if (pb->child_pbs) {
+                    for (int i = 0; i < type->modes[pb->mode].num_pb_type_children; i++) {
+                        if (pb->child_pbs[i]) {
+                            for (int j = 0; j < type->modes[pb->mode].pb_type_children[i].num_pb; j++) {
+                                auto result = recurse(&pb->child_pbs[i][j]);
+                                if (result.first) return result;
+                            }
+                        }
+                    }
+                }
+                return {nullptr, nullptr};
+            }
+        };
+
+        return recurse(cur_pb);
+    };
+
+    // Helper to find which primitive is using/driving a specific net
+    auto get_net_user_info = [&](AtomNetId net_id, bool is_input) -> std::string {
+        std::string info = "";
+
+        std::function<void(const t_pb*)> recurse = [&](const t_pb* pb) {
+            const t_pb_type* type = pb->pb_graph_node->pb_type;
+            if (type->num_modes == 0) { // Primitive
+                AtomBlockId blk_id = atom_ctx.lookup.pb_atom(pb);
+                if (!blk_id) return;
+
+                if (is_input) {
+                    // Check if this primitive consumes the net
+                    for (auto pin_id : atom_ctx.nlist.block_input_pins(blk_id)) {
+                        if (atom_ctx.nlist.pin_net(pin_id) == net_id) {
+                            if (!info.empty()) info += ", ";
+                            info += vtr::string_fmt("%s (%s)", atom_ctx.nlist.block_name(blk_id).c_str(), atom_ctx.nlist.block_model(blk_id)->name);
+                            // We found a use, but there might be multiple pins/primitives using it, so we could continue or stop.
+                            // For brevity, let's capture all primitives using it.
+                            return;
+                        }
+                    }
+                    // Also check clock pins if they are considered inputs in this context (usually yes)
+                    for (auto pin_id : atom_ctx.nlist.block_clock_pins(blk_id)) {
+                        if (atom_ctx.nlist.pin_net(pin_id) == net_id) {
+                            if (!info.empty()) info += ", ";
+                            info += vtr::string_fmt("%s (%s)", atom_ctx.nlist.block_name(blk_id).c_str(), atom_ctx.nlist.block_model(blk_id)->name);
+                            return;
+                        }
+                    }
+                } else {
+                    // Check if this primitive drives the net
+                    for (auto pin_id : atom_ctx.nlist.block_output_pins(blk_id)) {
+                        if (atom_ctx.nlist.pin_net(pin_id) == net_id) {
+                            if (!info.empty()) info += ", ";
+                            info += vtr::string_fmt("%s (%s)", atom_ctx.nlist.block_name(blk_id).c_str(), atom_ctx.nlist.block_model(blk_id)->name);
+                            return;
+                        }
+                    }
+                }
+            } else { // Cluster
+                if (pb->child_pbs) {
+                    for (int i = 0; i < type->modes[pb->mode].num_pb_type_children; i++) {
+                        if (pb->child_pbs[i]) {
+                            for (int j = 0; j < type->modes[pb->mode].pb_type_children[i].num_pb; j++) {
+                                recurse(&pb->child_pbs[i][j]);
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        recurse(cur_pb);
+        return info;
+    };
 
     if (pb_type->num_modes > 0 && cur_pb->name) {
         for (int i = 0; i < cur_pb->pb_graph_node->num_input_pin_class; i++) {
-            size_t class_size = cur_pb->pb_graph_node->input_pin_class_size[i];
+            size_t initial_class_size = cur_pb->pb_graph_node->input_pin_class_size[i];
+            size_t class_size = initial_class_size;
+            size_t ceil_class_size = class_size;
 
             if (cur_pb->is_root()) {
                 // Scale the class size by the maximum external pin utilization factor
                 // Use ceil to avoid classes of size 1 from being scaled to zero
                 class_size = std::ceil(max_external_pin_util.input_pin_util * class_size);
+                ceil_class_size = class_size;
                 // if the number of pins already used is larger than class size, then the number of
                 // cluster inputs already used should be our constraint. Why is this needed? This is
                 // needed since when packing the seed block the maximum external pin utilization is
@@ -938,16 +1059,92 @@ static bool check_lookahead_pins_used(t_pb* cur_pb, t_ext_pin_util max_external_
             }
 
             if (cur_pb->pb_stats->lookahead_input_pins_used[i].size() > class_size) {
+                std::string pin_name = "unknown";
+                // Find a pin in this class to get its name
+                bool found = false;
+                for (int port = 0; port < cur_pb->pb_graph_node->num_input_ports && !found; ++port) {
+                    for (int pin = 0; pin < cur_pb->pb_graph_node->num_input_pins[port]; ++pin) {
+                        if (cur_pb->pb_graph_node->input_pins[port][pin].pin_class == i) {
+                            pin_name = cur_pb->pb_graph_node->input_pins[port][pin].port->name;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+
+                auto prim_info = find_primitive_pin_for_class(i, true);
+                std::string prim_msg = "";
+                if (prim_info.first) {
+                    prim_msg = vtr::string_fmt(" (Primitive: %s, Pin: %s)",
+                                               prim_info.first->name, prim_info.second->to_string().c_str());
+                }
+
+                // VTR_LOG("(1) check_lookahead_pins_used: FAILED - lookahead input pins used %zu > class size %zu (Class %d, Port %s)%s (Init: %zu, Ceil: %zu, Max: %zu)\n",
+                //         cur_pb->pb_stats->lookahead_input_pins_used[i].size(), class_size, i, pin_name.c_str(), prim_msg.c_str(), initial_class_size, ceil_class_size, class_size);
+
+                // VTR_LOG(" -> Block Type: %s\n", cur_pb->pb_graph_node->pb_type->name);
+                // VTR_LOG(" -> Pins in Class %d:\n", i);
+                for (int port = 0; port < cur_pb->pb_graph_node->num_input_ports; ++port) {
+                    for (int pin = 0; pin < cur_pb->pb_graph_node->num_input_pins[port]; ++pin) {
+                        if (cur_pb->pb_graph_node->input_pins[port][pin].pin_class == i) {
+                            VTR_LOG("    %s\n", cur_pb->pb_graph_node->input_pins[port][pin].to_string().c_str());
+                        }
+                    }
+                }
+
+                // VTR_LOG(" -> Used Nets in Class %d:\n", i);
+                for (const auto& net_id : cur_pb->pb_stats->lookahead_input_pins_used[i]) {
+                    std::string user_info = get_net_user_info(net_id, true);
+                    VTR_LOG("    Net: %s -> Used by: %s\n", atom_ctx.nlist.net_name(net_id).c_str(), user_info.c_str());
+                }
+
+                // VTR_LOG(" -> All Input Class Status:\n");
+                for (int k = 0; k < cur_pb->pb_graph_node->num_input_pin_class; k++) {
+                    size_t k_size = cur_pb->pb_graph_node->input_pin_class_size[k];
+                    if (cur_pb->is_root()) {
+                        k_size = std::ceil(max_external_pin_util.input_pin_util * k_size);
+                        k_size = std::max<size_t>(k_size, cur_pb->pb_stats->input_pins_used[k].size());
+                    }
+                    VTR_LOG("    Class %d: Used %zu, Size %zu\n", k, cur_pb->pb_stats->lookahead_input_pins_used[k].size(), k_size);
+                }
+
                 return false;
+            } else if (cur_pb->pb_stats->lookahead_input_pins_used[i].size() > 0) {
+                std::string pin_name = "unknown";
+                // Find a pin in this class to get its name
+                bool found = false;
+                for (int port = 0; port < cur_pb->pb_graph_node->num_input_ports && !found; ++port) {
+                    for (int pin = 0; pin < cur_pb->pb_graph_node->num_input_pins[port]; ++pin) {
+                        if (cur_pb->pb_graph_node->input_pins[port][pin].pin_class == i) {
+                            pin_name = cur_pb->pb_graph_node->input_pins[port][pin].port->name;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+
+                auto prim_info = find_primitive_pin_for_class(i, true);
+                std::string prim_msg = "";
+                if (prim_info.first) {
+                    prim_msg = vtr::string_fmt(" (Primitive: %s, Pin: %s)",
+                                               prim_info.first->name, prim_info.second->to_string().c_str());
+                }
+
+                // VTR_LOG("(1) check_lookahead_pins_used: OK - lookahead input pins used %zu <= class size %zu (Class %d, Port %s)%s (Init: %zu, Ceil: %zu, Max: %zu)\n",
+                //         cur_pb->pb_stats->lookahead_input_pins_used[i].size(), class_size, i, pin_name.c_str(), prim_msg.c_str(), initial_class_size, ceil_class_size, class_size);
             }
         }
 
         for (int i = 0; i < cur_pb->pb_graph_node->num_output_pin_class; i++) {
-            size_t class_size = cur_pb->pb_graph_node->output_pin_class_size[i];
+            size_t initial_class_size = cur_pb->pb_graph_node->output_pin_class_size[i];
+            size_t class_size = initial_class_size;
+            size_t ceil_class_size = class_size;
+
             if (cur_pb->is_root()) {
                 // Scale the class size by the maximum external pin utilization factor
                 // Use ceil to avoid classes of size 1 from being scaled to zero
                 class_size = std::ceil(max_external_pin_util.output_pin_util * class_size);
+                ceil_class_size = class_size;
                 // if the number of pins already used is larger than class size, then the number of
                 // cluster outputs already used should be our constraint. Why is this needed? This is
                 // needed since when packing the seed block the maximum external pin utilization is
@@ -958,7 +1155,79 @@ static bool check_lookahead_pins_used(t_pb* cur_pb, t_ext_pin_util max_external_
             }
 
             if (cur_pb->pb_stats->lookahead_output_pins_used[i].size() > class_size) {
+                std::string pin_name = "unknown";
+                // Find a pin in this class to get its name
+                bool found = false;
+                for (int port = 0; port < cur_pb->pb_graph_node->num_output_ports && !found; ++port) {
+                    for (int pin = 0; pin < cur_pb->pb_graph_node->num_output_pins[port]; ++pin) {
+                        if (cur_pb->pb_graph_node->output_pins[port][pin].pin_class == i) {
+                            pin_name = cur_pb->pb_graph_node->output_pins[port][pin].port->name;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+
+                auto prim_info = find_primitive_pin_for_class(i, false);
+                std::string prim_msg = "";
+                if (prim_info.first) {
+                    prim_msg = vtr::string_fmt(" (Primitive: %s, Pin: %s)",
+                                               prim_info.first->name, prim_info.second->to_string().c_str());
+                }
+
+                VTR_LOG("(2) check_lookahead_pins_used: FAILED - lookahead output pins used %zu > class size %zu (Class %d, Port %s)%s (Init: %zu, Ceil: %zu, Max: %zu)\n",
+                        cur_pb->pb_stats->lookahead_output_pins_used[i].size(), class_size, i, pin_name.c_str(), prim_msg.c_str(), initial_class_size, ceil_class_size, class_size);
+
+                VTR_LOG(" -> Block Type: %s\n", cur_pb->pb_graph_node->pb_type->name);
+                VTR_LOG(" -> Pins in Class %d:\n", i);
+                for (int port = 0; port < cur_pb->pb_graph_node->num_output_ports; ++port) {
+                    for (int pin = 0; pin < cur_pb->pb_graph_node->num_output_pins[port]; ++pin) {
+                        if (cur_pb->pb_graph_node->output_pins[port][pin].pin_class == i) {
+                            VTR_LOG("    %s\n", cur_pb->pb_graph_node->output_pins[port][pin].to_string().c_str());
+                        }
+                    }
+                }
+
+                VTR_LOG(" -> Used Nets in Class %d:\n", i);
+                for (const auto& net_id : cur_pb->pb_stats->lookahead_output_pins_used[i]) {
+                    std::string user_info = get_net_user_info(net_id, false);
+                    VTR_LOG("    Net: %s -> Driven by: %s\n", atom_ctx.nlist.net_name(net_id).c_str(), user_info.c_str());
+                }
+
+                VTR_LOG(" -> All Output Class Status:\n");
+                for (int k = 0; k < cur_pb->pb_graph_node->num_output_pin_class; k++) {
+                    size_t k_size = cur_pb->pb_graph_node->output_pin_class_size[k];
+                    if (cur_pb->is_root()) {
+                        k_size = std::ceil(max_external_pin_util.output_pin_util * k_size);
+                        k_size = std::max<size_t>(k_size, cur_pb->pb_stats->output_pins_used[k].size());
+                    }
+                    VTR_LOG("    Class %d: Used %zu, Size %zu\n", k, cur_pb->pb_stats->lookahead_output_pins_used[k].size(), k_size);
+                }
+
                 return false;
+            } else if (cur_pb->pb_stats->lookahead_output_pins_used[i].size() > 0) {
+                std::string pin_name = "unknown";
+                // Find a pin in this class to get its name
+                bool found = false;
+                for (int port = 0; port < cur_pb->pb_graph_node->num_output_ports && !found; ++port) {
+                    for (int pin = 0; pin < cur_pb->pb_graph_node->num_output_pins[port]; ++pin) {
+                        if (cur_pb->pb_graph_node->output_pins[port][pin].pin_class == i) {
+                            pin_name = cur_pb->pb_graph_node->output_pins[port][pin].port->name;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+
+                auto prim_info = find_primitive_pin_for_class(i, false);
+                std::string prim_msg = "";
+                if (prim_info.first) {
+                    prim_msg = vtr::string_fmt(" (Primitive: %s, Pin: %s)",
+                                               prim_info.first->name, prim_info.second->to_string().c_str());
+                }
+
+                // VTR_LOG("(2) check_lookahead_pins_used: OK - lookahead output pins used %zu <= class size %zu (Class %d, Port %s)%s (Init: %zu, Ceil: %zu, Max: %zu)\n",
+                //         cur_pb->pb_stats->lookahead_output_pins_used[i].size(), class_size, i, pin_name.c_str(), prim_msg.c_str(), initial_class_size, ceil_class_size, class_size);
             }
         }
 
@@ -966,14 +1235,16 @@ static bool check_lookahead_pins_used(t_pb* cur_pb, t_ext_pin_util max_external_
             for (int i = 0; i < pb_type->modes[cur_pb->mode].num_pb_type_children; i++) {
                 if (cur_pb->child_pbs[i]) {
                     for (int j = 0; j < pb_type->modes[cur_pb->mode].pb_type_children[i].num_pb; j++) {
-                        if (!check_lookahead_pins_used(&cur_pb->child_pbs[i][j], max_external_pin_util))
+                        if (!check_lookahead_pins_used(&cur_pb->child_pbs[i][j], max_external_pin_util)) {
                             return false;
+                        }
                     }
                 }
             }
         }
     }
 
+    // VTR_LOG("(4) check_lookahead_pins_used: SUCCESS\n");
     return true;
 }
 
@@ -1027,8 +1298,8 @@ static void reset_molecule_info(t_pack_molecule* mol) {
     // then reset the chain id and the first packed molecule pointer
     // this is packing is being reset
     if (mol->is_chain()
-            && mol->chain_info->is_long_chain
-            && mol->chain_info->first_packed_molecule == mol) {
+        && mol->chain_info->is_long_chain
+        && mol->chain_info->first_packed_molecule == mol) {
         mol->chain_info->first_packed_molecule = nullptr;
         mol->chain_info->chain_id = -1;
     }
@@ -1193,7 +1464,7 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
                                                         LegalizationCluster& cluster,
                                                         LegalizationClusterId cluster_id,
                                                         const t_ext_pin_util& max_external_pin_util) {
-    VTR_LOG("ClusterLegalizer::try_pack_molecule: molecule=%s\n", molecule->pack_pattern->name);
+    VTR_LOG("ClusterLegalizer::try_pack_molecule: molecule=%s\n", (molecule->pack_pattern ? molecule->pack_pattern->name : "NULL"));
     // Safety debugs.
     VTR_ASSERT_DEBUG(molecule != nullptr);
     VTR_ASSERT_DEBUG(cluster.pb != nullptr);
@@ -1215,7 +1486,7 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
                 atom_ctx.nlist.block_model(root_atom)->name);
         VTR_LOGV(molecule->pack_pattern,
                  " molecule_type %s molecule_size %zu",
-                 molecule->pack_pattern->name,
+                 (molecule->pack_pattern ? molecule->pack_pattern->name : "NULL"),
                  molecule->atom_block_ids.size());
         VTR_LOG("\n");
     }
@@ -1315,6 +1586,11 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
                                                          cluster.router_data,
                                                          log_verbosity_,
                                                          feasible_block_array_size_);
+        }
+        if (block_pack_status == e_block_pack_status::BLK_PASSED) {
+            VTR_LOG("ClusterLegalizer::try_pack_molecule: BLK_PASSED\n");
+        } else {
+            VTR_LOG("ClusterLegalizer::try_pack_molecule: BLK_FAILED_FEASIBLE\n");
         }
 
         if (enable_pin_feasibility_filter_ && block_pack_status == e_block_pack_status::BLK_PASSED) {
@@ -1479,14 +1755,14 @@ std::tuple<e_block_pack_status, LegalizationClusterId>
 ClusterLegalizer::start_new_cluster(t_pack_molecule* molecule,
                                     t_logical_block_type_ptr cluster_type,
                                     int cluster_mode) {
-    VTR_LOG("ClusterLegalizer::start_new_cluster: molecule=%s type=%s mode=%d\n", molecule->pack_pattern->name, cluster_type->name.c_str(), cluster_mode);
+    const char* mol_name = (molecule->pack_pattern) ? molecule->pack_pattern->name : "single_atom";
+    VTR_LOG("ClusterLegalizer::start_new_cluster: molecule=%s type=%s mode=%d\n", mol_name, cluster_type->name.c_str(), cluster_mode);
     // Safety asserts to ensure the API is being called with valid arguments.
     VTR_ASSERT_DEBUG(molecule != nullptr);
     VTR_ASSERT_DEBUG(cluster_type != nullptr);
     VTR_ASSERT_DEBUG(cluster_mode < cluster_type->pb_graph_head->pb_type->num_modes);
     // Ensure that the molecule has not already been placed.
-    VTR_ASSERT_SAFE(molecule_cluster_.find(molecule) == molecule_cluster_.end() ||
-                    !molecule_cluster_[molecule].is_valid());
+    VTR_ASSERT_SAFE(molecule_cluster_.find(molecule) == molecule_cluster_.end() || !molecule_cluster_[molecule].is_valid());
     // Safety asserts to ensure that the API was initialized properly.
     VTR_ASSERT_DEBUG(lb_type_rr_graphs_ != nullptr);
 
@@ -1556,15 +1832,14 @@ e_block_pack_status ClusterLegalizer::add_mol_to_cluster(t_pack_molecule* molecu
     VTR_ASSERT_SAFE(cluster_id.is_valid() && (size_t)cluster_id < legalization_clusters_.size());
     VTR_ASSERT(legalization_cluster_ids_[cluster_id].is_valid() && "Cannot add to a destroyed cluster");
     // Ensure that the molecule has not already been placed.
-    VTR_ASSERT(molecule_cluster_.find(molecule) == molecule_cluster_.end() ||
-               !molecule_cluster_[molecule].is_valid());
+    VTR_ASSERT(molecule_cluster_.find(molecule) == molecule_cluster_.end() || !molecule_cluster_[molecule].is_valid());
     // Safety asserts to ensure that the API was initialized properly.
     VTR_ASSERT_DEBUG(lb_type_rr_graphs_ != nullptr);
 
     // Get the cluster.
     LegalizationCluster& cluster = legalization_clusters_[cluster_id];
     VTR_ASSERT(cluster.router_data != nullptr && cluster.placement_stats != nullptr
-                && "Cannot add molecule to cleaned cluster!");
+               && "Cannot add molecule to cleaned cluster!");
     // Set the target_external_pin_util.
     t_ext_pin_util target_ext_pin_util = target_external_pin_util_.get_pin_util(cluster.type->name);
     // Try to pack the molecule into the cluster.
@@ -1592,8 +1867,7 @@ void ClusterLegalizer::destroy_cluster(LegalizationClusterId cluster_id) {
     LegalizationCluster& cluster = legalization_clusters_[cluster_id];
     // Remove all molecules from the cluster.
     for (t_pack_molecule* mol : cluster.molecules) {
-        VTR_ASSERT_SAFE(molecule_cluster_.find(mol) != molecule_cluster_.end() &&
-                        molecule_cluster_[mol] == cluster_id);
+        VTR_ASSERT_SAFE(molecule_cluster_.find(mol) != molecule_cluster_.end() && molecule_cluster_[mol] == cluster_id);
         molecule_cluster_[mol] = LegalizationClusterId::INVALID();
         // Revert the placement of all blocks in the molecule.
         int molecule_size = get_array_size_of_molecule(mol);
@@ -1653,7 +1927,7 @@ void ClusterLegalizer::clean_cluster(LegalizationClusterId cluster_id) {
     // Get the cluster.
     LegalizationCluster& cluster = legalization_clusters_[cluster_id];
     VTR_ASSERT(cluster.router_data != nullptr && cluster.placement_stats != nullptr
-                && "Should not clean an already cleaned cluster!");
+               && "Should not clean an already cleaned cluster!");
     // Free the pb stats.
     free_pb_stats_recursive(cluster.pb);
     // Load the pb_route so we can free the cluster router data.
@@ -1693,7 +1967,8 @@ ClusterLegalizer::ClusterLegalizer(const AtomNetlist& atom_netlist,
                                    ClusterLegalizationStrategy cluster_legalization_strategy,
                                    bool enable_pin_feasibility_filter,
                                    int feasible_block_array_size,
-                                   int log_verbosity) : prepacker_(prepacker) {
+                                   int log_verbosity)
+    : prepacker_(prepacker) {
     // Verify that the inputs are valid.
     VTR_ASSERT_SAFE(lb_type_rr_graphs != nullptr);
 

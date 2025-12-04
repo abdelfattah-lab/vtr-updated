@@ -174,8 +174,7 @@ void print_pack_status(int tot_num_molecules,
 
     int num_clusters_created = cluster_legalizer.clusters().size();
 
-    if (mols_since_last_print >= int_molecule_increment ||
-        num_molecules_processed == tot_num_molecules) {
+    if (mols_since_last_print >= int_molecule_increment || num_molecules_processed == tot_num_molecules) {
         VTR_LOG(
             "%6d/%-6d  %3d%%   "
             "%26d   "
@@ -201,7 +200,6 @@ void print_pack_status(int tot_num_molecules,
 
 void rebuild_attraction_groups(AttractionInfo& attraction_groups,
                                const ClusterLegalizer& cluster_legalizer) {
-
     for (int igroup = 0; igroup < attraction_groups.num_attraction_groups(); igroup++) {
         AttractGroupId group_id(igroup);
         AttractionGroup& group = attraction_groups.get_attraction_group_info(group_id);
@@ -346,7 +344,7 @@ void alloc_and_init_clustering(const t_molecule_stats& max_molecule_stats,
     std::stable_sort(molecules_vector.begin(),
                      molecules_vector.end(),
                      [](t_pack_molecule* a, t_pack_molecule* b) {
-                        return a->base_gain < b->base_gain;
+                         return a->base_gain < b->base_gain;
                      });
 
     clustering_data.memory_pool = new t_molecule_link[num_molecules];
@@ -373,7 +371,6 @@ t_pack_molecule* get_molecule_by_num_ext_inputs(const int ext_inps,
                                                 t_molecule_link* unclustered_list_head,
                                                 LegalizationClusterId legalization_cluster_id,
                                                 const ClusterLegalizer& cluster_legalizer) {
-
     t_molecule_link* prev_ptr = &unclustered_list_head[ext_inps];
     t_molecule_link* ptr = unclustered_list_head[ext_inps].next;
     while (ptr != nullptr) {
@@ -574,7 +571,6 @@ void mark_and_update_partial_gain(const AtomNetId net_id,
                                   const std::unordered_set<AtomNetId>& is_global,
                                   const int high_fanout_net_threshold,
                                   const std::unordered_set<AtomNetId>& net_output_feeds_driving_block_input) {
-
     const AtomContext& atom_ctx = g_vpr_ctx.atom();
     t_pb* cur_pb = atom_ctx.lookup.atom_pb(clustered_blk_id)->parent_pb;
     cur_pb = get_top_level_pb(cur_pb);
@@ -718,7 +714,6 @@ void update_cluster_stats(const t_pack_molecule* molecule,
                           const SetupTimingInfo& timing_info,
                           AttractionInfo& attraction_groups,
                           const std::unordered_set<AtomNetId>& net_output_feeds_driving_block_input) {
-
     int molecule_size;
     int iblock;
     t_pb *cur_pb, *cb;
@@ -836,25 +831,48 @@ t_pack_molecule* get_highest_gain_molecule(t_pb* cur_pb,
      * This routine populates a list of feasible blocks outside the cluster, then returns the best candidate for the cluster.
      * If there are no feasible blocks it returns a nullptr.
      */
+    VTR_LOG("get_highest_gain_molecule: entered\n");
 
     if (gain_mode == HILL_CLIMBING) {
         VPR_FATAL_ERROR(VPR_ERROR_PACK,
                         "Hill climbing not supported yet, error out.\n");
     }
 
+    if (!cur_pb->pb_stats) {
+        VTR_LOG("get_highest_gain_molecule: cur_pb->pb_stats is NULL!\n");
+    } else {
+        VTR_LOG("get_highest_gain_molecule: checking num_feasible_blocks\n");
+    }
+
     // 1. Find unpacked molecules based on criticality and strong connectedness (connected by low fanout nets) with current cluster
     if (cur_pb->pb_stats->num_feasible_blocks == NOT_VALID) {
+        VTR_LOG("get_highest_gain_molecule: num_feasible_blocks is NOT_VALID, calling add_cluster_molecule_candidates_by_connectivity_and_timing\n");
         add_cluster_molecule_candidates_by_connectivity_and_timing(cur_pb,
                                                                    legalization_cluster_id,
                                                                    prepacker,
                                                                    cluster_legalizer,
                                                                    feasible_block_array_size,
                                                                    attraction_groups);
+        VTR_LOG("get_highest_gain_molecule: returned from add_cluster_molecule_candidates_by_connectivity_and_timing\n");
     }
+
+    VTR_LOG("get_highest_gain_molecule: checking prioritize_transitive_connectivity: %d\n", prioritize_transitive_connectivity);
 
     if (prioritize_transitive_connectivity) {
         // 2. Find unpacked molecules based on transitive connections (eg. 2 hops away) with current cluster
+        VTR_LOG("get_highest_gain_molecule: checking transitive connections\n");
+
+        VTR_LOG("get_highest_gain_molecule: cur_pb=%p\n", cur_pb);
+        if (cur_pb) {
+            VTR_LOG("get_highest_gain_molecule: cur_pb->pb_stats=%p\n", cur_pb->pb_stats);
+            if (cur_pb->pb_stats) {
+                VTR_LOG("get_highest_gain_molecule: num_feasible_blocks=%d\n", cur_pb->pb_stats->num_feasible_blocks);
+                VTR_LOG("get_highest_gain_molecule: explore_transitive_fanout=%d\n", cur_pb->pb_stats->explore_transitive_fanout);
+            }
+        }
+
         if (cur_pb->pb_stats->num_feasible_blocks == 0 && cur_pb->pb_stats->explore_transitive_fanout) {
+            VTR_LOG("get_highest_gain_molecule: calling add_cluster_molecule_candidates_by_transitive_connectivity\n");
             add_cluster_molecule_candidates_by_transitive_connectivity(cur_pb,
                                                                        prepacker,
                                                                        cluster_legalizer,
@@ -865,6 +883,7 @@ t_pack_molecule* get_highest_gain_molecule(t_pb* cur_pb,
                                                                        attraction_groups);
         }
 
+        VTR_LOG("checkpoint 1\n");
         // 3. Find unpacked molecules based on weak connectedness (connected by high fanout nets) with current cluster
         if (cur_pb->pb_stats->num_feasible_blocks == 0 && cur_pb->pb_stats->tie_break_high_fanout_net) {
             add_cluster_molecule_candidates_by_highfanout_connectivity(cur_pb,
@@ -874,6 +893,8 @@ t_pack_molecule* get_highest_gain_molecule(t_pb* cur_pb,
                                                                        feasible_block_array_size,
                                                                        attraction_groups);
         }
+
+        VTR_LOG("checkpoint 2\n");
     } else { //Reverse order
         // 3. Find unpacked molecules based on weak connectedness (connected by high fanout nets) with current cluster
         if (cur_pb->pb_stats->num_feasible_blocks == 0 && cur_pb->pb_stats->tie_break_high_fanout_net) {
@@ -885,6 +906,8 @@ t_pack_molecule* get_highest_gain_molecule(t_pb* cur_pb,
                                                                        attraction_groups);
         }
 
+        VTR_LOG("checkpoint 3\n");
+
         // 2. Find unpacked molecules based on transitive connections (eg. 2 hops away) with current cluster
         if (cur_pb->pb_stats->num_feasible_blocks == 0 && cur_pb->pb_stats->explore_transitive_fanout) {
             add_cluster_molecule_candidates_by_transitive_connectivity(cur_pb,
@@ -896,7 +919,11 @@ t_pack_molecule* get_highest_gain_molecule(t_pb* cur_pb,
                                                                        feasible_block_array_size,
                                                                        attraction_groups);
         }
+
+        VTR_LOG("checkpoint 4\n");
     }
+
+    VTR_LOG("checkpoint 5\n");
 
     // 4. Find unpacked molecules based on attraction group of the current cluster (if the cluster has an attraction group)
     if (cur_pb->pb_stats->num_feasible_blocks == 0) {
@@ -908,16 +935,27 @@ t_pack_molecule* get_highest_gain_molecule(t_pb* cur_pb,
                                                             legalization_cluster_id,
                                                             primitive_candidate_block_types);
     }
+
+    VTR_LOG("checkpoint 6\n");
     /* Grab highest gain molecule */
     t_pack_molecule* molecule = nullptr;
     if (cur_pb->pb_stats->num_feasible_blocks > 0) {
         cur_pb->pb_stats->num_feasible_blocks--;
         int index = cur_pb->pb_stats->num_feasible_blocks;
         molecule = cur_pb->pb_stats->feasible_blocks[index];
+        VTR_LOG("get_highest_gain_molecule: checking molecule %p at index %d\n", molecule, index);
+        if (molecule) {
+            VTR_LOG("get_highest_gain_molecule: molecule->atom_block_ids size: %zu\n", molecule->atom_block_ids.size());
+            if (molecule->atom_block_ids.size() > 0) {
+                VTR_LOG("get_highest_gain_molecule: molecule->atom_block_ids[0]: %zu\n", size_t(molecule->atom_block_ids[0]));
+            }
+        }
         VTR_ASSERT(!cluster_legalizer.is_mol_clustered(molecule));
+        VTR_LOG("(1) add_cluster_molecule_candidates_by_connectivity_and_timing: molecule found");
         return molecule;
     }
 
+    VTR_LOG("(2) add_cluster_molecule_candidates_by_connectivity_and_timing: molecule found");
     return molecule;
 }
 
@@ -927,22 +965,33 @@ void add_cluster_molecule_candidates_by_connectivity_and_timing(t_pb* cur_pb,
                                                                 const ClusterLegalizer& cluster_legalizer,
                                                                 const int feasible_block_array_size,
                                                                 AttractionInfo& attraction_groups) {
+    VTR_LOG("add_cluster_molecule_candidates_by_connectivity_and_timing: entered\n");
     VTR_ASSERT(cur_pb->pb_stats->num_feasible_blocks == NOT_VALID);
 
     cur_pb->pb_stats->num_feasible_blocks = 0;
     cur_pb->pb_stats->explore_transitive_fanout = true; /* If no legal molecules found, enable exploration of molecules two hops away */
 
+    VTR_LOG("add_cluster_molecule_candidates_by_connectivity_and_timing: iterating marked_blocks, size=%zu\n", cur_pb->pb_stats->marked_blocks.size());
     for (AtomBlockId blk_id : cur_pb->pb_stats->marked_blocks) {
+        // VTR_LOG("  checking blk_id: %zu\n", size_t(blk_id));
         if (!cluster_legalizer.is_atom_clustered(blk_id)) {
             t_pack_molecule* molecule = prepacker.get_atom_molecule(blk_id);
+            // VTR_LOG("    molecule: %p\n", molecule);
+            if (!molecule) {
+                VTR_LOG("    molecule is NULL for blk_id %zu\n", size_t(blk_id));
+                continue;
+            }
+
             if (!cluster_legalizer.is_mol_clustered(molecule)) {
                 if (cluster_legalizer.is_molecule_compatible(molecule, legalization_cluster_id)) {
+                    // VTR_LOG("    adding candidate\n");
                     add_molecule_to_pb_stats_candidates(molecule,
                                                         cur_pb->pb_stats->gain, cur_pb, feasible_block_array_size, attraction_groups);
                 }
             }
         }
     }
+    VTR_LOG("add_cluster_molecule_candidates_by_connectivity_and_timing: done\n");
 }
 
 void add_cluster_molecule_candidates_by_highfanout_connectivity(t_pb* cur_pb,
@@ -1136,10 +1185,18 @@ t_pack_molecule* get_molecule_for_cluster(t_pb* cur_pb,
      * input, clock and capacity constraints of a cluster that are
      * passed in.  If no suitable block is found it returns nullptr.
      */
+    VTR_LOG("get_molecule_for_cluster: entered\n");
+
+    if (!cur_pb) {
+        VTR_LOG("get_molecule_for_cluster: cur_pb is null!\n");
+    } else {
+        VTR_LOG("get_molecule_for_cluster: cur_pb name: %s\n", cur_pb->name);
+    }
 
     VTR_ASSERT(cur_pb->is_root());
 
     /* If cannot pack into primitive, try packing into cluster */
+    VTR_LOG("get_molecule_for_cluster: calling get_highest_gain_molecule\n");
 
     auto best_molecule = get_highest_gain_molecule(cur_pb, attraction_groups,
                                                    NOT_HILL_CLIMBING,
