@@ -265,13 +265,13 @@ LegalizationClusterId GreedyClusterer::try_grow_cluster(
                                                                       num_used_type_instances,
                                                                       mutable_device_ctx);
 
-    VTR_LOG("try_grow_cluster: start_new_cluster returned id %zu\n", size_t(legalization_cluster_id));
+    // VTR_LOG("try_grow_cluster: start_new_cluster returned id %zu\n", size_t(legalization_cluster_id));
 
     auto cluster_type = cluster_legalizer.get_cluster_type(legalization_cluster_id);
-    VTR_LOG("try_grow_cluster: cluster type name: %s\n", cluster_type->name.c_str());
+    // VTR_LOG("try_grow_cluster: cluster type name: %s\n", cluster_type->name.c_str());
 
     int high_fanout_threshold = high_fanout_thresholds_.get_threshold(cluster_type->name);
-    VTR_LOG("try_grow_cluster: high_fanout_threshold: %d\n", high_fanout_threshold);
+    // VTR_LOG("try_grow_cluster: high_fanout_threshold: %d\n", high_fanout_threshold);
 
     update_cluster_stats(seed_mol,
                          cluster_legalizer,
@@ -284,7 +284,7 @@ LegalizationClusterId GreedyClusterer::try_grow_cluster(
                          timing_info,
                          attraction_groups,
                          net_output_feeds_driving_block_input_);
-    VTR_LOG("try_grow_cluster: update_cluster_stats done\n");
+    // VTR_LOG("try_grow_cluster: update_cluster_stats done\n");
 
     int num_unrelated_clustering_attempts = 0;
     t_pack_molecule* candidate_mol;
@@ -463,18 +463,18 @@ LegalizationClusterId GreedyClusterer::start_new_cluster(
         //Try packing into each mode
         e_block_pack_status pack_result = e_block_pack_status::BLK_STATUS_UNDEFINED;
         for (int j = 0; j < type->pb_graph_head->pb_type->num_modes && !success; j++) {
-            VTR_LOG("Attempting to pack seed %s into type %s mode %d (%s)\n", root_atom_name.c_str(), type->name.c_str(), j, type->pb_graph_head->pb_type->modes[j].name);
+            // VTR_LOG("Attempting to pack seed %s into type %s mode %d (%s)\n", root_atom_name.c_str(), type->name.c_str(), j, type->pb_graph_head->pb_type->modes[j].name);
             std::tie(pack_result, new_cluster_id) = cluster_legalizer.start_new_cluster(seed_mol, type, j);
             success = (pack_result == e_block_pack_status::BLK_PASSED);
         }
 
         if (success) {
-            VTR_LOG("PASSED_SEED: Block Type %s\n", type->name.c_str());
+            // VTR_LOG("PASSED_SEED: Block Type %s\n", type->name.c_str());
             // If clustering succeeds return the new_cluster_id and type.
             block_type = type;
             break;
         } else {
-            VTR_LOG("FAILED_SEED: Block Type %s\n", type->name.c_str());
+            // VTR_LOG("FAILED_SEED: Block Type %s\n", type->name.c_str());
         }
     }
 
@@ -502,25 +502,25 @@ LegalizationClusterId GreedyClusterer::start_new_cluster(
     // TODO: Below may make more sense in its own method.
 
     // Successfully created cluster
-    VTR_LOG("\nIncrementing num_used_type_instances...\n");
+    // VTR_LOG("\nIncrementing num_used_type_instances...\n");
     num_used_type_instances[block_type]++;
 
     /* Expand FPGA size if needed */
     // Check used type instances against the possible equivalent physical locations
     unsigned int num_instances = 0;
-    VTR_LOG("Checking equivalent tiles...\n");
+    // VTR_LOG("Checking equivalent tiles...\n");
     for (auto equivalent_tile : block_type->equivalent_tiles) {
         num_instances += mutable_device_ctx.grid.num_instances(equivalent_tile, -1);
     }
-    VTR_LOG("num_instances: %u, used: %zu\n", num_instances, num_used_type_instances[block_type]);
+    // VTR_LOG("num_instances: %u, used: %zu\n", num_instances, num_used_type_instances[block_type]);
 
     if (num_used_type_instances[block_type] > num_instances) {
-        VTR_LOG("Resizing grid...\n");
+        // VTR_LOG("Resizing grid...\n");
         mutable_device_ctx.grid = create_device_grid(packer_opts_.device_layout,
                                                      arch_.grid_layouts,
                                                      num_used_type_instances,
                                                      packer_opts_.target_device_utilization);
-        VTR_LOG("Grid resized.\n");
+        // VTR_LOG("Grid resized.\n");
     }
 
     return new_cluster_id;
