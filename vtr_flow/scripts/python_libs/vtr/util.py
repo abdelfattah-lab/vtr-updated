@@ -173,7 +173,7 @@ class CommandRunner:
 
             # Constants for log rotation
             MAX_LOG_SIZE_MB = 100
-            LINES_TO_KEEP = 10000
+            LINES_TO_KEEP = 1000
             CHECK_INTERVAL = 1000  # Check every N lines
 
             log_path = temp_dir / log_filename
@@ -193,8 +193,10 @@ class CommandRunner:
                     log_f.write(line)
                     line_count += 1
 
-                    # Save the output
+                    # Save the output (keep only last LINES_TO_KEEP to avoid memory bloat)
                     cmd_output.append(line)
+                    if len(cmd_output) > LINES_TO_KEEP:
+                        cmd_output = cmd_output[-LINES_TO_KEEP:]
 
                     # Check if we need to truncate the log (every CHECK_INTERVAL lines)
                     if line_count % CHECK_INTERVAL == 0:
