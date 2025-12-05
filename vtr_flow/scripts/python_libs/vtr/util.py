@@ -170,7 +170,18 @@ class CommandRunner:
             #
             # We do this rather than use proc.communicate()
             # to get interactive output
-            with (temp_dir / log_filename).open("w") as log_f:
+
+            # Constants for log rotation
+            MAX_LOG_SIZE_MB = 100
+            LINES_TO_KEEP = 10000
+            CHECK_INTERVAL = 1000  # Check every N lines
+
+            log_path = temp_dir / log_filename
+            line_count = 0
+
+            # Open log file manually to allow for rotation
+            log_f = log_path.open("a")
+            try:
                 # Print the command at the top of the log
                 log_f.write(" ".join(cmd))
                 log_f.write("\n")
@@ -180,9 +191,34 @@ class CommandRunner:
 
                     # Send to log file
                     log_f.write(line)
+                    line_count += 1
 
                     # Save the output
                     cmd_output.append(line)
+
+                    # Check if we need to truncate the log (every CHECK_INTERVAL lines)
+                    if line_count % CHECK_INTERVAL == 0:
+                        log_f.flush()
+                        file_size = log_path.stat().st_size
+                        max_size = MAX_LOG_SIZE_MB * 1024 * 1024
+
+                        if file_size > max_size:
+                            # Close the file temporarily
+                            log_f.close()
+
+                            # Read and keep only the last N lines
+                            with log_path.open("r") as f:
+                                lines = f.readlines()
+
+                            if len(lines) > LINES_TO_KEEP:
+                                lines = lines[-LINES_TO_KEEP:]
+
+                            # Rewrite the file with truncated content
+                            with log_path.open("w") as f:
+                                f.writelines(lines)
+
+                            # Reopen in append mode
+                            log_f = log_path.open("a")
 
                     # Abort if over time limit
                     elapsed_time = time.time() - start_time
@@ -192,6 +228,10 @@ class CommandRunner:
                 # Should now be finished (since we stopped reading from proc.stdout),
                 # sets the return code
                 proc.wait()
+            finally:
+                # Make sure to close the log file
+                if log_f and not log_f.closed:
+                    log_f.close()
 
         finally:
             # Clean-up if we did not exit cleanly
