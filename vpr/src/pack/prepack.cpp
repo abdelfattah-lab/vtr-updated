@@ -1004,12 +1004,20 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                                 // We must disconnect its cin from whatever it was connected to (e.g. gnd)
                                 // and connect it to our new cout net.
                                 AtomPortId next_cin_port = atom_nlist.find_atom_port(next_blk, cin_model_port);
-                                if (next_cin_port) {
-                                    AtomPinId next_cin_pin = atom_nlist.port_pin(next_cin_port, 0);
-                                    if (next_cin_pin) {
-                                        // set_pin_net automatically removes the previous connection
-                                        atom_nlist.set_pin_net(next_cin_pin, PinType::SINK, cout_net);
-                                    }
+                                if (!next_cin_port) {
+                                    // Next block doesn't have a CIN port (e.g., it's a root/dummy node that was
+                                    // originally at the start of its chain). Create one now so we can connect to it.
+                                    next_cin_port = atom_nlist.create_port(next_blk, cin_model_port);
+                                }
+
+                                AtomPinId next_cin_pin = atom_nlist.port_pin(next_cin_port, 0);
+                                if (next_cin_pin) {
+                                    // Pin exists, rewire it
+                                    // set_pin_net automatically removes the previous connection
+                                    atom_nlist.set_pin_net(next_cin_pin, PinType::SINK, cout_net);
+                                } else {
+                                    // Pin doesn't exist yet (newly created port), create it
+                                    atom_nlist.create_pin(next_cin_port, 0, cout_net, PinType::SINK, false);
                                 }
                             }
                         }
@@ -1153,12 +1161,20 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                                 // We must disconnect its cin from whatever it was connected to (e.g. gnd)
                                 // and connect it to our new cout net.
                                 AtomPortId next_cin_port = atom_nlist.find_atom_port(next_blk, cin_model_port);
-                                if (next_cin_port) {
-                                    AtomPinId next_cin_pin = atom_nlist.port_pin(next_cin_port, 0);
-                                    if (next_cin_pin) {
-                                        // set_pin_net automatically removes the previous connection
-                                        atom_nlist.set_pin_net(next_cin_pin, PinType::SINK, cout_net);
-                                    }
+                                if (!next_cin_port) {
+                                    // Next block doesn't have a CIN port (e.g., it's a root/dummy node that was
+                                    // originally at the start of its chain). Create one now so we can connect to it.
+                                    next_cin_port = atom_nlist.create_port(next_blk, cin_model_port);
+                                }
+
+                                AtomPinId next_cin_pin = atom_nlist.port_pin(next_cin_port, 0);
+                                if (next_cin_pin) {
+                                    // Pin exists, rewire it
+                                    // set_pin_net automatically removes the previous connection
+                                    atom_nlist.set_pin_net(next_cin_pin, PinType::SINK, cout_net);
+                                } else {
+                                    // Pin doesn't exist yet (newly created port), create it
+                                    atom_nlist.create_pin(next_cin_port, 0, cout_net, PinType::SINK, false);
                                 }
                             }
                         }
