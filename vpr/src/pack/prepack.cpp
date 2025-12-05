@@ -915,18 +915,19 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                         bool has_downstream = (next_idx >= 20 && cur_molecule->atom_block_ids[next_idx]);
 
                         // Create ports on the new block
-                        AtomPortId cin_port_id = atom_nlist.create_port(new_blk_id, cin_model_port);
+                        // Only create CIN port if not at start of Row 1 chain (position 39)
+                        AtomPortId cin_port_id = (row1_idx != 39) ? atom_nlist.create_port(new_blk_id, cin_model_port) : AtomPortId::INVALID();
                         AtomPortId a_port_id = a_model_port ? atom_nlist.create_port(new_blk_id, a_model_port) : AtomPortId::INVALID();
                         AtomPortId b_port_id = b_model_port ? atom_nlist.create_port(new_blk_id, b_model_port) : AtomPortId::INVALID();
                         AtomPortId sumout_port_id = sumout_model_port ? atom_nlist.create_port(new_blk_id, sumout_model_port) : AtomPortId::INVALID();
                         // Only create COUT if there's a downstream block
                         AtomPortId cout_port_id = has_downstream ? atom_nlist.create_port(new_blk_id, cout_model_port) : AtomPortId::INVALID();
 
-                        // Determine Driver for CIN
+                        // Determine Driver for CIN (only if not at start of chain)
                         AtomNetId cin_driver_net;
                         if (row1_idx == 39) {
-                            // Start of chain -> GND
-                            cin_driver_net = gnd_net_id;
+                            // Start of Row 1 chain -> No CIN needed (like position 0 in Row 0)
+                            // cin_port_id is already INVALID, cin_driver_net stays uninitialized
                         } else {
                             // Middle of chain -> Driven by previous block's COUT
                             AtomBlockId prev_blk = cur_molecule->atom_block_ids[row1_idx + 1];
@@ -963,8 +964,10 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                             }
                         }
 
-                        // Connect CIN
-                        atom_nlist.create_pin(cin_port_id, 0, cin_driver_net, PinType::SINK, false);
+                        // Connect CIN (only if not at start of Row 1 chain)
+                        if (cin_port_id) {
+                            atom_nlist.create_pin(cin_port_id, 0, cin_driver_net, PinType::SINK, false);
+                        }
 
                         // Connect A and B to ground (for pass-through behavior: A=0, B=0 makes SUM=CIN)
                         if (a_port_id) {
@@ -1060,19 +1063,20 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                         bool has_downstream = (next_idx < 20 && cur_molecule->atom_block_ids[next_idx]);
 
                         // Create ports on the new block
-                        AtomPortId cin_port_id = atom_nlist.create_port(new_blk_id, cin_model_port);
+                        // Only create CIN port if not at start of Row 0 chain (position 0)
+                        AtomPortId cin_port_id = (row0_idx != 0) ? atom_nlist.create_port(new_blk_id, cin_model_port) : AtomPortId::INVALID();
                         AtomPortId a_port_id = a_model_port ? atom_nlist.create_port(new_blk_id, a_model_port) : AtomPortId::INVALID();
                         AtomPortId b_port_id = b_model_port ? atom_nlist.create_port(new_blk_id, b_model_port) : AtomPortId::INVALID();
                         AtomPortId sumout_port_id = sumout_model_port ? atom_nlist.create_port(new_blk_id, sumout_model_port) : AtomPortId::INVALID();
                         // Only create COUT if there's a downstream block
                         AtomPortId cout_port_id = has_downstream ? atom_nlist.create_port(new_blk_id, cout_model_port) : AtomPortId::INVALID();
 
-                        // Determine Driver for CIN
+                        // Determine Driver for CIN (only if not at start of chain)
                         // Row 0 chain flows: 0 → 1 → 2 → ... → 19
                         AtomNetId cin_driver_net;
                         if (row0_idx == 0) {
-                            // Start of row 0 chain -> GND
-                            cin_driver_net = gnd_net_id;
+                            // Start of Row 0 chain -> No CIN needed (like position 39 in Row 1)
+                            // cin_port_id is already INVALID, cin_driver_net stays uninitialized
                         } else {
                             // Middle of chain -> Driven by previous block's COUT (position i-1)
                             AtomBlockId prev_blk = cur_molecule->atom_block_ids[row0_idx - 1];
@@ -1109,8 +1113,10 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                             }
                         }
 
-                        // Connect CIN
-                        atom_nlist.create_pin(cin_port_id, 0, cin_driver_net, PinType::SINK, false);
+                        // Connect CIN (only if not at start of Row 0 chain)
+                        if (cin_port_id) {
+                            atom_nlist.create_pin(cin_port_id, 0, cin_driver_net, PinType::SINK, false);
+                        }
 
                         // Connect A and B to ground (for pass-through behavior: A=0, B=0 makes SUM=CIN)
                         if (a_port_id) {
