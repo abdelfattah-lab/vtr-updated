@@ -358,25 +358,67 @@ static enum e_block_pack_status check_chain_root_placement_feasibility(const t_p
     if (is_long_chain || chain_net_id) {
         auto chain_id = molecule->chain_info->chain_id;
         VTR_LOG("check_chain_root_placement_feasibility: chain_id=%d\n", chain_id);
-        // if this chain has a chain id assigned to it (implies is_long_chain too)
-        if (chain_id != -1) {
-            // the chosen primitive should be a valid starting point for the chain
-            // long chains should only be placed at the top of the chain tieOff = 0
-            bool found = false;
-            for (const auto* pin : chain_root_pins[chain_id]) {
-                VTR_LOG("check_chain_root_placement_feasibility: chain_id=%d pin=%s\n", chain_id, pin->parent_node->hierarchical_type_name().c_str());
-                if (pb_graph_node == pin->parent_node) {
-                    found = true;
-                    break;
+
+        // For any long chain molecule with a cin driven by an already-placed atom,
+        // we must place this molecule on the same row as the driver. This is the
+        // most general constraint - the physical carry chain connections between
+        // CLBs are row-specific.
+        int required_row = -1;
+        if (is_long_chain && chain_net_id) {
+            AtomPinId driver_pin = atom_ctx.nlist.net_driver(chain_net_id);
+            if (driver_pin) {
+                AtomBlockId driver_blk = atom_ctx.nlist.pin_block(driver_pin);
+                const t_pb* driver_pb = atom_ctx.lookup.atom_pb(driver_blk);
+                if (driver_pb && driver_pb->pb_graph_node) {
+                    required_row = driver_pb->pb_graph_node->placement_index;
+                    VTR_LOG("check_chain_root_placement_feasibility: cin driver %s is on row %d\n",
+                            atom_ctx.nlist.block_name(driver_blk).c_str(), required_row);
                 }
             }
-            if (!found) {
-                VTR_LOG("check_chain_root_placement_feasibility: FAILED - pb_graph_node %s is not a valid root for chain_id %d\n", pb_graph_node->hierarchical_type_name().c_str(), chain_id);
+        }
+
+        // If we determined a required row from the driver, enforce it
+        if (required_row != -1) {
+            if (pb_graph_node->placement_index != required_row) {
+                VTR_LOG("check_chain_root_placement_feasibility: FAILED - must be on row %d (same as cin driver), but proposed row is %d\n",
+                        required_row, pb_graph_node->placement_index);
                 block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
             }
-            // the chain doesn't have an assigned chain_id yet
+            // If row matches, we're good - block_pack_status stays BLK_PASSED
+        }
+        // Otherwise, fall back to chain_id based checks or default checks
+        else if (chain_id != -1) {
+            // For single-chain patterns (chain_root_pins.size() == 1) that can be placed
+            // on multiple physical rows, chain_id represents the placement_index (row)
+            // that this long chain is committed to. Enforce that all molecules in the
+            // chain are placed on the same row.
+            if (chain_root_pins.size() == 1) {
+                // chain_id is the placement_index (row) - enforce row consistency
+                if (pb_graph_node->placement_index != chain_id) {
+                    VTR_LOG("check_chain_root_placement_feasibility: FAILED - pb_graph_node %s has placement_index %d but chain requires row %d\n",
+                            pb_graph_node->hierarchical_type_name().c_str(), pb_graph_node->placement_index, chain_id);
+                    block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
+                }
+            } else {
+                // For multi-chain patterns, chain_id is an index into chain_root_pins
+                // the chosen primitive should be a valid starting point for the chain
+                // long chains should only be placed at the top of the chain tieOff = 0
+                bool found = false;
+                for (const auto* pin : chain_root_pins[chain_id]) {
+                    VTR_LOG("check_chain_root_placement_feasibility: chain_id=%d pin=%s\n", chain_id, pin->parent_node->hierarchical_type_name().c_str());
+                    if (pb_graph_node == pin->parent_node) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    VTR_LOG("check_chain_root_placement_feasibility: FAILED - pb_graph_node %s is not a valid root for chain_id %d\n", pb_graph_node->hierarchical_type_name().c_str(), chain_id);
+                    block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
+                }
+            }
         } else {
-            // VTR_LOG("check_chain_root_placement_feasibility: FAILED - No chain_id assigned, checking all chains\n"); // This log was misleading in the previous snippet as it wasn't necessarily a failure yet
+            // No required row from driver and no chain_id assigned yet.
+            // Check if this is a valid starting point for any chain.
             block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
             int chain_idx = 0;
             for (const auto& chain : chain_root_pins) {
@@ -391,8 +433,6 @@ static enum e_block_pack_status check_chain_root_placement_feasibility(const t_p
                         block_pack_status = e_block_pack_status::BLK_PASSED;
                         break;
                     }
-                    // long chains should only be placed at the top of the chain tieOff = 0
-                    // if (is_long_chain) break; // REMOVED: Allow checking all starting points
                 }
                 if (block_pack_status == e_block_pack_status::BLK_PASSED) break;
             }
@@ -1270,6 +1310,18 @@ static void update_molecule_chain_info(t_pack_molecule* chain_molecule, const t_
             chain_molecule->chain_info->first_packed_molecule = chain_molecule;
             return;
         }
+    }
+
+    // For single-chain patterns (chain_root_pins.size() == 1) that can be placed
+    // on multiple physical rows (e.g., simple_chain on a dual-row architecture),
+    // the root_primitive may not match chain_root_pins[0][0]->parent_node exactly.
+    // In this case, use the placement_index of the root_primitive to determine
+    // which row this chain is committed to, ensuring subsequent molecules in the
+    // same long chain are placed on the same row.
+    if (chain_root_pins.size() == 1) {
+        chain_molecule->chain_info->chain_id = root_primitive->placement_index;
+        chain_molecule->chain_info->first_packed_molecule = chain_molecule;
+        return;
     }
 
     // For some architectures (e.g. DCC-style extra carry chains), the first

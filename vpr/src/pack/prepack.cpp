@@ -896,17 +896,13 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                         const t_model_ports* cin_model_port = cur_molecule->pack_pattern->chain_root_pins[0][0]->port->model_port;
                         const t_model_ports* cout_model_port = cur_molecule->pack_pattern->chain_exit_pins[0]->port->model_port;
 
-                        // Find a, b, and sumout model ports from the adder model
+                        // Find a and b model ports from the adder model
                         const t_model* adder_model = model;
                         const t_model_ports* a_model_port = nullptr;
                         const t_model_ports* b_model_port = nullptr;
-                        const t_model_ports* sumout_model_port = nullptr;
                         for (const t_model_ports* port = adder_model->inputs; port; port = port->next) {
                             if (std::string(port->name) == "a") a_model_port = port;
                             if (std::string(port->name) == "b") b_model_port = port;
-                        }
-                        for (const t_model_ports* port = adder_model->outputs; port; port = port->next) {
-                            if (std::string(port->name) == "sumout") sumout_model_port = port;
                         }
 
                         // Check if there's a downstream block that needs COUT
@@ -919,7 +915,6 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                         AtomPortId cin_port_id = (row1_idx != 39) ? atom_nlist.create_port(new_blk_id, cin_model_port) : AtomPortId::INVALID();
                         AtomPortId a_port_id = a_model_port ? atom_nlist.create_port(new_blk_id, a_model_port) : AtomPortId::INVALID();
                         AtomPortId b_port_id = b_model_port ? atom_nlist.create_port(new_blk_id, b_model_port) : AtomPortId::INVALID();
-                        AtomPortId sumout_port_id = sumout_model_port ? atom_nlist.create_port(new_blk_id, sumout_model_port) : AtomPortId::INVALID();
                         // Only create COUT if there's a downstream block
                         AtomPortId cout_port_id = has_downstream ? atom_nlist.create_port(new_blk_id, cout_model_port) : AtomPortId::INVALID();
 
@@ -1022,13 +1017,6 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                             }
                         }
 
-                        // Create SUMOUT net (for sumout connections between rows)
-                        if (sumout_port_id) {
-                            std::string sumout_net_name = atom_nlist.block_name(new_blk_id) + "_sumout";
-                            AtomNetId sumout_net = atom_nlist.create_net(sumout_net_name);
-                            atom_nlist.create_pin(sumout_port_id, 0, sumout_net, PinType::DRIVER, false);
-                        }
-
                         // 3. Update Molecule
                         cur_molecule->atom_block_ids[row1_idx] = new_blk_id;
                         cur_molecule->num_blocks++; // Increment block count
@@ -1052,17 +1040,13 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                         const t_model_ports* cin_model_port = cur_molecule->pack_pattern->chain_root_pins[0][0]->port->model_port;
                         const t_model_ports* cout_model_port = cur_molecule->pack_pattern->chain_exit_pins[0]->port->model_port;
 
-                        // Find a, b, and sumout model ports from the adder model
+                        // Find a and b model ports from the adder model
                         const t_model* adder_model = model;
                         const t_model_ports* a_model_port = nullptr;
                         const t_model_ports* b_model_port = nullptr;
-                        const t_model_ports* sumout_model_port = nullptr;
                         for (const t_model_ports* port = adder_model->inputs; port; port = port->next) {
                             if (std::string(port->name) == "a") a_model_port = port;
                             if (std::string(port->name) == "b") b_model_port = port;
-                        }
-                        for (const t_model_ports* port = adder_model->outputs; port; port = port->next) {
-                            if (std::string(port->name) == "sumout") sumout_model_port = port;
                         }
 
                         // Check if there's a downstream block that needs COUT
@@ -1075,7 +1059,6 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                         AtomPortId cin_port_id = (row0_idx != 0) ? atom_nlist.create_port(new_blk_id, cin_model_port) : AtomPortId::INVALID();
                         AtomPortId a_port_id = a_model_port ? atom_nlist.create_port(new_blk_id, a_model_port) : AtomPortId::INVALID();
                         AtomPortId b_port_id = b_model_port ? atom_nlist.create_port(new_blk_id, b_model_port) : AtomPortId::INVALID();
-                        AtomPortId sumout_port_id = sumout_model_port ? atom_nlist.create_port(new_blk_id, sumout_model_port) : AtomPortId::INVALID();
                         // Only create COUT if there's a downstream block
                         AtomPortId cout_port_id = has_downstream ? atom_nlist.create_port(new_blk_id, cout_model_port) : AtomPortId::INVALID();
 
@@ -1177,13 +1160,6 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                                     atom_nlist.create_pin(next_cin_port, 0, cout_net, PinType::SINK, false);
                                 }
                             }
-                        }
-
-                        // Create SUMOUT net (for sumout connections between rows)
-                        if (sumout_port_id) {
-                            std::string sumout_net_name = atom_nlist.block_name(new_blk_id) + "_sumout";
-                            AtomNetId sumout_net = atom_nlist.create_net(sumout_net_name);
-                            atom_nlist.create_pin(sumout_port_id, 0, sumout_net, PinType::DRIVER, false);
                         }
 
                         // 3. Update Molecule
@@ -2313,8 +2289,14 @@ static void init_molecule_chain_info(const AtomBlockId blk_id,
         prev_molecule->chain_info->is_long_chain = true;
         // this new molecule should share the same chain_info
         molecule->chain_info = prev_molecule->chain_info;
-        // if the two molecules are of different types
-        if (prev_molecule->pack_pattern->chain_root_pins.size() < molecule->pack_pattern->chain_root_pins.size()) {
+        // If the two molecules are of different types and the previous molecule
+        // has multiple chain options (chain_root_pins.size() > 1), we can determine
+        // which chain this molecule belongs to based on the driver's placement.
+        // However, if prev_molecule has only one chain option (e.g., simple_chain),
+        // we cannot determine the chain_id yet - it must be set during clustering
+        // when we know which physical row the chain is placed on.
+        if (prev_molecule->pack_pattern->chain_root_pins.size() > 1 &&
+            prev_molecule->pack_pattern->chain_root_pins.size() < molecule->pack_pattern->chain_root_pins.size()) {
             molecule->chain_info->chain_id = get_forced_chain_id(molecule, prev_molecule, driver_atom_id);
         }
     }
