@@ -395,6 +395,28 @@ static enum e_block_pack_status check_chain_root_placement_feasibility(const t_p
     // driven by a global gnd or vdd. Therefore even if this is not a long chain
     // but its input pin is driven by a net, the placement legality is checked.
     if (is_long_chain || chain_net_id) {
+        // First, check per-molecule entry requirement (handles cout->cin sync
+        // for chains transitioning between different pattern types)
+        int req_entry = molecule->required_entry_chain_id;
+        if (req_entry != -1) {
+            // Ensure this pattern supports the required entry
+            if (req_entry >= static_cast<int>(chain_root_pins.size())) {
+                VTR_LOG("check_chain_root_placement_feasibility: required_entry %d >= chain_root_pins.size() %zu\n",
+                        req_entry, chain_root_pins.size());
+                return e_block_pack_status::BLK_FAILED_FEASIBLE;
+            }
+
+            // Must place at tieOff 0 of the required entry (long chain constraint)
+            if (!pb_graph_nodes_equivalent(pb_graph_node,
+                    chain_root_pins[req_entry][0]->parent_node)) {
+                VTR_LOG("check_chain_root_placement_feasibility: required_entry %d mismatch\n", req_entry);
+                return e_block_pack_status::BLK_FAILED_FEASIBLE;
+            }
+
+            // Entry requirement satisfied
+            return e_block_pack_status::BLK_PASSED;
+        }
+
         auto chain_id = molecule->chain_info->chain_id;
         // if this chain has a chain id assigned to it (implies is_long_chain too)
         if (chain_id != -1) {

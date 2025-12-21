@@ -148,6 +148,10 @@ static int get_forced_chain_id(t_pack_molecule* molecule,
                                const t_pack_molecule* prev_molecule,
                                const AtomBlockId driver_block_id);
 
+static int determine_upstream_exit_chain_id(const t_pack_molecule* molecule,
+                                            const t_pack_molecule* prev_molecule,
+                                            const AtomBlockId driver_atom_id);
+
 static AtomBlockId get_adder_driver_block(const AtomBlockId block_id,
                                           const t_pack_patterns* pack_pattern,
                                           const std::multimap<AtomBlockId, t_pack_molecule*>& atom_molecules,
@@ -1785,6 +1789,7 @@ static void print_pack_molecules(const char* fname,
             if (list_of_molecules_current->is_chain()) {
                 fprintf(fp, "\tis_long_chain: %d\n", list_of_molecules_current->chain_info->is_long_chain);
                 fprintf(fp, "\tchain_id: %d\n", list_of_molecules_current->chain_info->chain_id);
+                fprintf(fp, "\trequired_entry_chain_id: %d\n", list_of_molecules_current->required_entry_chain_id);
                 fprintf(fp, "\tfirst_pack_molecule: %p\n", (void*)list_of_molecules_current->chain_info->first_packed_molecule);
             }
             for (i = 0; i < list_of_molecules_current->pack_pattern->num_blocks;
@@ -2287,6 +2292,8 @@ static void init_molecule_chain_info(const AtomBlockId blk_id,
         // allocate chain info
         molecule->chain_info = std::make_shared<t_chain_info>();
         // chain_id defaults to -1 for short chains (no specific architectural chain assigned)
+        // First molecule in chain has no entry requirement
+        molecule->required_entry_chain_id = -1;
         // this is not the first molecule to be created for this chain
     } else {
         // molecule driving blk_id
@@ -2297,6 +2304,13 @@ static void init_molecule_chain_info(const AtomBlockId blk_id,
         prev_molecule->chain_info->is_long_chain = true;
         // this new molecule should share the same chain_info
         molecule->chain_info = prev_molecule->chain_info;
+
+        // Determine which exit of prev_molecule feeds this molecule's chain input.
+        // This becomes our required entry via positional mapping: exit[i] -> entry[i]
+        // For same-pattern transitions, returns -1 to defer to chain_info->chain_id
+        molecule->required_entry_chain_id = determine_upstream_exit_chain_id(
+            molecule, prev_molecule, driver_atom_id);
+
         // if the two molecules are of different types
         if (prev_molecule->pack_pattern->chain_root_pins.size() < molecule->pack_pattern->chain_root_pins.size()) {
             molecule->chain_info->chain_id = get_forced_chain_id(molecule, prev_molecule, driver_atom_id);
@@ -2695,6 +2709,68 @@ static int get_forced_chain_id(t_pack_molecule* molecule, const t_pack_molecule*
     }
 
     VTR_ASSERT(false);
+    return -1;
+}
+
+/**
+ * Determines which chain_exit_pins index the upstream molecule uses
+ * to drive this molecule's chain input.
+ *
+ * This traces the netlist connectivity to find which cout of the
+ * upstream molecule feeds this molecule's cin. The result is used
+ * as the required_entry_chain_id for the downstream molecule via
+ * positional mapping: upstream exit[i] maps to downstream entry[i].
+ *
+ * For same-pattern transitions (e.g., simple_chain -> simple_chain),
+ * returns -1 because the exit is determined by chain_id at placement time,
+ * not by the pattern structure. The downstream should inherit via
+ * chain_info->chain_id which is set when the first molecule is placed.
+ *
+ * @param molecule The downstream molecule (current molecule being processed)
+ * @param prev_molecule The upstream molecule that feeds this molecule
+ * @param driver_atom_id The atom in prev_molecule that drives our chain input
+ * @return The exit chain ID (index into prev_molecule's chain_exit_pins),
+ *         or -1 if not determinable or if patterns are equivalent.
+ */
+static int determine_upstream_exit_chain_id(const t_pack_molecule* molecule,
+                                            const t_pack_molecule* prev_molecule,
+                                            const AtomBlockId driver_atom_id) {
+    // Get prev_molecule's exit pins
+    if (!prev_molecule->pack_pattern) return -1;
+    const auto& exit_pins = prev_molecule->pack_pattern->chain_exit_pins;
+    if (exit_pins.empty()) return -1;
+
+    // For same-pattern transitions, defer to chain_info->chain_id at clustering time.
+    // When patterns are the same (or have the same structure), the exit is determined
+    // by which row the first molecule is placed in (chain_id), not by pattern structure.
+    // The downstream molecule will inherit via shared chain_info->chain_id.
+    if (molecule->pack_pattern == prev_molecule->pack_pattern ||
+        molecule->pack_pattern->chain_root_pins.size() == prev_molecule->pack_pattern->chain_root_pins.size()) {
+        return -1;
+    }
+
+    // Different patterns (e.g., cascaded -> simple transition):
+    // Determine exit based on pattern structure
+    t_pb_graph_node* driver_pb_node = get_driver_pb_graph_node(prev_molecule, driver_atom_id);
+    if (!driver_pb_node) return -1;
+
+    // Find which exit pin's parent node matches the driver
+    const auto cout_model = exit_pins[0]->port->model_port;
+
+    for (int iport = 0; iport < driver_pb_node->num_output_ports; iport++) {
+        for (int ipin = 0; ipin < driver_pb_node->num_output_pins[iport]; ipin++) {
+            const auto& pin = driver_pb_node->output_pins[iport][ipin];
+            if (pin.port->model_port == cout_model) {
+                // Found the cout pin - match against exit_pins
+                for (size_t exit_id = 0; exit_id < exit_pins.size(); exit_id++) {
+                    if (pin.parent_node->placement_index ==
+                        exit_pins[exit_id]->parent_node->placement_index) {
+                        return static_cast<int>(exit_id);
+                    }
+                }
+            }
+        }
+    }
     return -1;
 }
 

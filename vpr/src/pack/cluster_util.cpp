@@ -126,7 +126,12 @@ void echo_chain_clusters(const char* filename,
             if (chain->chain_info) {
                 fprintf(fp, "    - Chain ID: %d\n", chain->chain_info->chain_id);
                 fprintf(fp, "    - Is long chain: %s\n", chain->chain_info->is_long_chain ? "Yes" : "No");
+                if (chain->chain_info->first_packed_molecule) {
+                    AtomBlockId first_root = chain->chain_info->first_packed_molecule->atom_block_ids[chain->chain_info->first_packed_molecule->root];
+                    fprintf(fp, "    - First packed molecule root: %s\n", atom_ctx.nlist.block_name(first_root).c_str());
+                }
             }
+            fprintf(fp, "    - Required entry chain ID: %d\n", chain->required_entry_chain_id);
 
             fprintf(fp, "    - Atoms in chain (with physical location):\n");
             for (const AtomBlockId& atom_id : chain->atom_block_ids) {

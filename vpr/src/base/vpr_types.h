@@ -408,6 +408,24 @@ class t_pack_molecule {
     std::vector<AtomBlockId> atom_block_ids;
     std::shared_ptr<t_chain_info> chain_info;
 
+    /**
+     * Required entry chain ID for this molecule based on upstream connectivity.
+     *
+     * When this molecule is part of a long chain, this field indicates which
+     * chain_root_pins[id] entry point is required to maintain proper cout→cin
+     * connectivity with the upstream molecule.
+     *
+     * -1 means:
+     *   - Not part of a long chain, OR
+     *   - First molecule in chain (no upstream requirement), OR
+     *   - Not yet determined
+     *
+     * Determined during prepacking by tracing which upstream exit feeds this
+     * molecule's chain input. Uses positional mapping: upstream exit[i] maps
+     * to downstream entry[i].
+     */
+    int required_entry_chain_id = -1;
+
     t_pack_molecule* next;
     // a molecule is chain is it is a forced pack and its pack pattern is chain
     bool is_chain() const { return type == MOLECULE_FORCED_PACK && pack_pattern->is_chain; }
