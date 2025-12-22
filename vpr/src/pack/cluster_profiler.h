@@ -54,6 +54,15 @@ struct ClusterStats {
 
     // Primitive type name breakdown (name -> count)
     std::map<std::string, int> primitives_by_type;
+
+    // Pack pattern -> flat_site_index -> count (for location analysis)
+    std::map<std::string, std::map<int, int>> pattern_location_attempts;
+    // Pack pattern -> flat_site_index -> expansion failures
+    std::map<std::string, std::map<int, int>> pattern_location_expand_fails;
+    // Pack pattern -> flat_site_index -> routing failures
+    std::map<std::string, std::map<int, int>> pattern_location_route_fails;
+    // Pack pattern -> flat_site_index -> successes
+    std::map<std::string, std::map<int, int>> pattern_location_successes;
 };
 
 /**
@@ -149,6 +158,32 @@ public:
     void record_primitive_candidate_by_type(const std::string& type_name) {
         if (!enabled_) return;
         current_stats_.primitives_by_type[type_name]++;
+    }
+
+    // Record a primitive candidate with pack pattern and location info
+    void record_pattern_location_attempt(const std::string& pattern_name, int flat_site_index) {
+        if (!enabled_) return;
+        current_stats_.pattern_location_attempts[pattern_name][flat_site_index]++;
+        current_pattern_name_ = pattern_name;
+        current_flat_site_index_ = flat_site_index;
+    }
+
+    // Record expansion failure for current pattern/location
+    void record_pattern_location_expand_fail() {
+        if (!enabled_ || current_pattern_name_.empty()) return;
+        current_stats_.pattern_location_expand_fails[current_pattern_name_][current_flat_site_index_]++;
+    }
+
+    // Record routing failure for current pattern/location
+    void record_pattern_location_route_fail() {
+        if (!enabled_ || current_pattern_name_.empty()) return;
+        current_stats_.pattern_location_route_fails[current_pattern_name_][current_flat_site_index_]++;
+    }
+
+    // Record success for current pattern/location
+    void record_pattern_location_success() {
+        if (!enabled_ || current_pattern_name_.empty()) return;
+        current_stats_.pattern_location_successes[current_pattern_name_][current_flat_site_index_]++;
     }
 
     void record_early_chain_reject() {
@@ -285,6 +320,108 @@ public:
             fprintf(fp, "\n");
         }
 
+        // Aggregate pattern location statistics across all clusters
+        std::map<std::string, std::map<int, int>> total_pattern_attempts;
+        std::map<std::string, std::map<int, int>> total_pattern_expand_fails;
+        std::map<std::string, std::map<int, int>> total_pattern_route_fails;
+        std::map<std::string, std::map<int, int>> total_pattern_successes;
+
+        for (const auto& stats : all_cluster_stats_) {
+            for (const auto& pattern_kv : stats.pattern_location_attempts) {
+                for (const auto& loc_kv : pattern_kv.second) {
+                    total_pattern_attempts[pattern_kv.first][loc_kv.first] += loc_kv.second;
+                }
+            }
+            for (const auto& pattern_kv : stats.pattern_location_expand_fails) {
+                for (const auto& loc_kv : pattern_kv.second) {
+                    total_pattern_expand_fails[pattern_kv.first][loc_kv.first] += loc_kv.second;
+                }
+            }
+            for (const auto& pattern_kv : stats.pattern_location_route_fails) {
+                for (const auto& loc_kv : pattern_kv.second) {
+                    total_pattern_route_fails[pattern_kv.first][loc_kv.first] += loc_kv.second;
+                }
+            }
+            for (const auto& pattern_kv : stats.pattern_location_successes) {
+                for (const auto& loc_kv : pattern_kv.second) {
+                    total_pattern_successes[pattern_kv.first][loc_kv.first] += loc_kv.second;
+                }
+            }
+        }
+
+        // Print pattern location breakdown
+        if (!total_pattern_attempts.empty()) {
+            fprintf(fp, "=================================================================\n");
+            fprintf(fp, "PACK PATTERN LOCATION ANALYSIS\n");
+            fprintf(fp, "=================================================================\n\n");
+
+            for (const auto& pattern_kv : total_pattern_attempts) {
+                const std::string& pattern_name = pattern_kv.first;
+                const auto& loc_attempts = pattern_kv.second;
+
+                // Compute totals for this pattern
+                long long pattern_total_attempts = 0;
+                long long pattern_total_expand_fails = 0;
+                long long pattern_total_route_fails = 0;
+                long long pattern_total_successes = 0;
+
+                for (const auto& loc_kv : loc_attempts) {
+                    pattern_total_attempts += loc_kv.second;
+                }
+                if (total_pattern_expand_fails.count(pattern_name)) {
+                    for (const auto& loc_kv : total_pattern_expand_fails[pattern_name]) {
+                        pattern_total_expand_fails += loc_kv.second;
+                    }
+                }
+                if (total_pattern_route_fails.count(pattern_name)) {
+                    for (const auto& loc_kv : total_pattern_route_fails[pattern_name]) {
+                        pattern_total_route_fails += loc_kv.second;
+                    }
+                }
+                if (total_pattern_successes.count(pattern_name)) {
+                    for (const auto& loc_kv : total_pattern_successes[pattern_name]) {
+                        pattern_total_successes += loc_kv.second;
+                    }
+                }
+
+                fprintf(fp, "Pattern: %s\n", pattern_name.c_str());
+                fprintf(fp, "  Total attempts: %lld, expand_fails: %lld, route_fails: %lld, successes: %lld\n",
+                        pattern_total_attempts, pattern_total_expand_fails,
+                        pattern_total_route_fails, pattern_total_successes);
+                fprintf(fp, "  Per-location breakdown (flat_site_index -> attempts/expand_fail/route_fail/success):\n");
+
+                // Sort locations by attempt count descending
+                std::vector<std::pair<int, int>> sorted_locs(loc_attempts.begin(), loc_attempts.end());
+                std::sort(sorted_locs.begin(), sorted_locs.end(),
+                          [](const auto& a, const auto& b) { return a.second > b.second; });
+
+                for (const auto& loc_kv : sorted_locs) {
+                    int loc = loc_kv.first;
+                    int attempts = loc_kv.second;
+                    int expand_fails = 0;
+                    int route_fails = 0;
+                    int successes = 0;
+
+                    if (total_pattern_expand_fails.count(pattern_name) &&
+                        total_pattern_expand_fails[pattern_name].count(loc)) {
+                        expand_fails = total_pattern_expand_fails[pattern_name][loc];
+                    }
+                    if (total_pattern_route_fails.count(pattern_name) &&
+                        total_pattern_route_fails[pattern_name].count(loc)) {
+                        route_fails = total_pattern_route_fails[pattern_name][loc];
+                    }
+                    if (total_pattern_successes.count(pattern_name) &&
+                        total_pattern_successes[pattern_name].count(loc)) {
+                        successes = total_pattern_successes[pattern_name][loc];
+                    }
+
+                    fprintf(fp, "    [%3d]: %8d / %8d / %8d / %8d\n",
+                            loc, attempts, expand_fails, route_fails, successes);
+                }
+                fprintf(fp, "\n");
+            }
+        }
+
         // Per-cluster details for slow clusters
         fprintf(fp, "=================================================================\n");
         fprintf(fp, "PER-CLUSTER DETAILS (sorted by time, top 20)\n");
@@ -380,6 +517,10 @@ private:
     TimePoint cluster_start_time_;
     std::map<std::string, TimePoint> phase_start_times_;
     std::vector<ClusterStats> all_cluster_stats_;
+
+    // Current pattern/location being attempted (for tracking failures)
+    std::string current_pattern_name_;
+    int current_flat_site_index_ = -1;
 };
 
 // Convenience macros for profiling
@@ -423,3 +564,15 @@ private:
 
 #define CLUSTER_PROFILE_EXPANSION_FAILURE() \
     ClusterProfiler::instance().record_expansion_failure()
+
+#define CLUSTER_PROFILE_PATTERN_LOCATION_ATTEMPT(pattern_name, flat_site_index) \
+    ClusterProfiler::instance().record_pattern_location_attempt(pattern_name, flat_site_index)
+
+#define CLUSTER_PROFILE_PATTERN_LOCATION_EXPAND_FAIL() \
+    ClusterProfiler::instance().record_pattern_location_expand_fail()
+
+#define CLUSTER_PROFILE_PATTERN_LOCATION_ROUTE_FAIL() \
+    ClusterProfiler::instance().record_pattern_location_route_fail()
+
+#define CLUSTER_PROFILE_PATTERN_LOCATION_SUCCESS() \
+    ClusterProfiler::instance().record_pattern_location_success()
