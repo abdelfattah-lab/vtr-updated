@@ -30,6 +30,18 @@ class t_intra_cluster_placement_stats;
 class t_pb_graph_node;
 struct t_lb_router_data;
 
+/**
+ * @brief Check if two pb_graph_nodes represent the same logical location.
+ *
+ * This compares nodes based on pb_type name and placement_index at each hierarchy
+ * level, ignoring mode differences. Used for chain placement validation where
+ * patterns may be discovered in different modes.
+ *
+ * @return true if the nodes represent the same logical primitive location
+ */
+bool pb_graph_nodes_equivalent(const t_pb_graph_node* node1,
+                               const t_pb_graph_node* node2);
+
 // A special ID to identify the legalization clusters. This is separate from the
 // ClusterBlockId since this legalizer is not necessarily tied to the Clustered
 // netlist, but is used as a sub-routine to it.

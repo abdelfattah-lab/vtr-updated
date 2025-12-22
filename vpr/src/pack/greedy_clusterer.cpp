@@ -45,7 +45,9 @@
 #include "atom_netlist.h"
 #include "attraction_groups.h"
 #include "cluster_legalizer.h"
+#include "cluster_profiler.h"
 #include "cluster_util.h"
+#include "echo_files.h"
 #include "constraints_report.h"
 #include "greedy_seed_selector.h"
 #include "pack_types.h"
@@ -155,7 +157,19 @@ GreedyClusterer::do_clustering(ClusterLegalizer& cluster_legalizer,
      * Clustering
      *****************************************************************/
 
+    // Enable cluster profiling if echo files are enabled
+    if (isEchoFileEnabled(E_ECHO_CLUSTERING_PROFILE)) {
+        ClusterProfiler::instance().enable();
+        ClusterProfiler::instance().reset();
+    }
+
     print_pack_status_header();
+
+    if (seed_mol) {
+        AtomBlockId root_atom = seed_mol->atom_block_ids[seed_mol->root];
+        if (root_atom.is_valid()) {
+        }
+    }
 
     // Continue clustering as long as a valid seed is returned from the seed
     // selector.
@@ -230,6 +244,12 @@ GreedyClusterer::do_clustering(ClusterLegalizer& cluster_legalizer,
     // If this architecture has LE physical block, report its usage.
     report_le_physical_block_usage(cluster_legalizer);
 
+    // Write clustering profile if enabled
+    if (ClusterProfiler::instance().is_enabled()) {
+        ClusterProfiler::instance().write_report(getEchoFileName(E_ECHO_CLUSTERING_PROFILE));
+        ClusterProfiler::instance().disable();
+    }
+
     // Free the clustering data.
     // FIXME: This struct should use standard data structures so it does not
     //        have to be freed like this. This is also specific to the candidate
@@ -259,20 +279,32 @@ LegalizationClusterId GreedyClusterer::try_grow_cluster(
     cluster_legalizer.set_legalization_strategy(strategy);
 
     // Use the seed to start a new cluster.
+    CLUSTER_PROFILE_START_PHASE("start_cluster");
     LegalizationClusterId legalization_cluster_id = start_new_cluster(seed_mol,
                                                                       cluster_legalizer,
                                                                       balance_block_type_utilization,
                                                                       num_used_type_instances,
                                                                       mutable_device_ctx);
+    CLUSTER_PROFILE_END_PHASE("start_cluster");
 
-    VTR_LOG("try_grow_cluster: start_new_cluster returned id %zu\n", size_t(legalization_cluster_id));
+    // VTR_LOG("try_grow_cluster: start_new_cluster returned id %zu\n", size_t(legalization_cluster_id));
+
+    // Start profiling this cluster
+    if (legalization_cluster_id.is_valid()) {
+        t_pb* pb = cluster_legalizer.get_cluster_pb(legalization_cluster_id);
+        auto cluster_type = cluster_legalizer.get_cluster_type(legalization_cluster_id);
+        CLUSTER_PROFILE_START_CLUSTER(size_t(legalization_cluster_id),
+                                       pb ? pb->name : "unknown",
+                                       cluster_type ? cluster_type->name : "unknown");
+    }
 
     auto cluster_type = cluster_legalizer.get_cluster_type(legalization_cluster_id);
-    VTR_LOG("try_grow_cluster: cluster type name: %s\n", cluster_type->name.c_str());
+    // VTR_LOG("try_grow_cluster: cluster type name: %s\n", cluster_type->name.c_str());
 
     int high_fanout_threshold = high_fanout_thresholds_.get_threshold(cluster_type->name);
-    VTR_LOG("try_grow_cluster: high_fanout_threshold: %d\n", high_fanout_threshold);
+    // VTR_LOG("try_grow_cluster: high_fanout_threshold: %d\n", high_fanout_threshold);
 
+    CLUSTER_PROFILE_START_PHASE("stats_update");
     update_cluster_stats(seed_mol,
                          cluster_legalizer,
                          is_clock_,  //Set of clock nets
@@ -284,10 +316,12 @@ LegalizationClusterId GreedyClusterer::try_grow_cluster(
                          timing_info,
                          attraction_groups,
                          net_output_feeds_driving_block_input_);
-    VTR_LOG("try_grow_cluster: update_cluster_stats done\n");
+    CLUSTER_PROFILE_END_PHASE("stats_update");
+    // VTR_LOG("try_grow_cluster: update_cluster_stats done\n");
 
     int num_unrelated_clustering_attempts = 0;
     t_pack_molecule* candidate_mol;
+    CLUSTER_PROFILE_START_PHASE("molecule_selection");
     candidate_mol = get_molecule_for_cluster(cluster_legalizer.get_cluster_pb(legalization_cluster_id),
                                              attraction_groups,
                                              allow_unrelated_clustering,
@@ -316,20 +350,29 @@ LegalizationClusterId GreedyClusterer::try_grow_cluster(
     if (attraction_groups.num_attraction_groups() > 0)
         max_num_repeated_molecules = attraction_groups_max_repeated_molecules_;
 
+    CLUSTER_PROFILE_END_PHASE("molecule_selection");
+
     // Continuously try to cluster candidate molecules into the cluster
     // until one of the following occurs:
     //  1) No candidate molecule is proposed.
     //  2) The same candidate was proposed multiple times.
     int num_repeated_molecules = 0;
     while (candidate_mol != nullptr && num_repeated_molecules < max_num_repeated_molecules) {
+        // Record molecule attempt
+        CLUSTER_PROFILE_MOLECULE_ATTEMPT(candidate_mol->is_chain());
+
         // Try to cluster the candidate molecule into the cluster.
+        CLUSTER_PROFILE_START_PHASE("molecule_packing");
         bool success = try_add_candidate_mol_to_cluster(candidate_mol,
                                                         legalization_cluster_id,
                                                         cluster_legalizer);
+        CLUSTER_PROFILE_END_PHASE("molecule_packing");
 
         // If the candidate molecule was clustered successfully, update
         // the cluster stats.
         if (success) {
+            CLUSTER_PROFILE_MOLECULE_SUCCESS(candidate_mol->is_chain());
+            CLUSTER_PROFILE_START_PHASE("stats_update");
             update_cluster_stats(candidate_mol,
                                  cluster_legalizer,
                                  is_clock_,  //Set of all clocks
@@ -343,11 +386,15 @@ LegalizationClusterId GreedyClusterer::try_grow_cluster(
                                  timing_info,
                                  attraction_groups,
                                  net_output_feeds_driving_block_input_);
+            CLUSTER_PROFILE_END_PHASE("stats_update");
             num_unrelated_clustering_attempts = 0;
+        } else {
+            CLUSTER_PROFILE_MOLECULE_FAILURE();
         }
 
         // Get the next candidate molecule.
         t_pack_molecule* prev_candidate_mol = candidate_mol;
+        CLUSTER_PROFILE_START_PHASE("molecule_selection");
         candidate_mol = get_molecule_for_cluster(cluster_legalizer.get_cluster_pb(legalization_cluster_id),
                                                  attraction_groups,
                                                  allow_unrelated_clustering,
@@ -363,6 +410,7 @@ LegalizationClusterId GreedyClusterer::try_grow_cluster(
                                                  clustering_data.unclustered_list_head,
                                                  clustering_data.unclustered_list_head_size,
                                                  primitive_candidate_block_types_);
+        CLUSTER_PROFILE_END_PHASE("molecule_selection");
 
         // If the next candidate molecule is the same as the previous
         // candidate molecule, increment the number of repreated
@@ -377,7 +425,9 @@ LegalizationClusterId GreedyClusterer::try_grow_cluster(
         // If the legalizer did not check everything for every molecule,
         // need to check that the full cluster is legal (need to perform
         // intra-lb routing).
+        CLUSTER_PROFILE_START_PHASE("legality_check");
         bool is_cluster_legal = cluster_legalizer.check_cluster_legality(legalization_cluster_id);
+        CLUSTER_PROFILE_END_PHASE("legality_check");
 
         if (!is_cluster_legal) {
             // If the cluster is not legal, undo the cluster.
@@ -386,10 +436,15 @@ LegalizationClusterId GreedyClusterer::try_grow_cluster(
             // Destroy the illegal cluster.
             cluster_legalizer.destroy_cluster(legalization_cluster_id);
             cluster_legalizer.compress();
+            // End profiling for failed cluster
+            CLUSTER_PROFILE_END_CLUSTER();
             // Cluster failed to grow.
             return LegalizationClusterId();
         }
     }
+
+    // End profiling for successful cluster
+    CLUSTER_PROFILE_END_CLUSTER();
 
     VTR_ASSERT(legalization_cluster_id.is_valid());
 
@@ -463,18 +518,17 @@ LegalizationClusterId GreedyClusterer::start_new_cluster(
         //Try packing into each mode
         e_block_pack_status pack_result = e_block_pack_status::BLK_STATUS_UNDEFINED;
         for (int j = 0; j < type->pb_graph_head->pb_type->num_modes && !success; j++) {
-            VTR_LOG("Attempting to pack seed %s into type %s mode %d (%s)\n", root_atom_name.c_str(), type->name.c_str(), j, type->pb_graph_head->pb_type->modes[j].name);
             std::tie(pack_result, new_cluster_id) = cluster_legalizer.start_new_cluster(seed_mol, type, j);
             success = (pack_result == e_block_pack_status::BLK_PASSED);
         }
 
         if (success) {
-            VTR_LOG("PASSED_SEED: Block Type %s\n", type->name.c_str());
+            // VTR_LOG("PASSED_SEED: Block Type %s\n", type->name.c_str());
             // If clustering succeeds return the new_cluster_id and type.
             block_type = type;
             break;
         } else {
-            VTR_LOG("FAILED_SEED: Block Type %s\n", type->name.c_str());
+            // VTR_LOG("FAILED_SEED: Block Type %s\n", type->name.c_str());
         }
     }
 
@@ -529,34 +583,31 @@ LegalizationClusterId GreedyClusterer::start_new_cluster(
 bool GreedyClusterer::try_add_candidate_mol_to_cluster(t_pack_molecule* candidate_mol,
                                                        LegalizationClusterId legalization_cluster_id,
                                                        ClusterLegalizer& cluster_legalizer) {
-    VTR_LOG("try_add_candidate_mol_to_cluster: entered\n");
+    // VTR_LOG("try_add_candidate_mol_to_cluster: entered\n");
     VTR_ASSERT(candidate_mol != nullptr);
-    VTR_LOG("try_add_candidate_mol_to_cluster: checking is_mol_clustered\n");
+    // VTR_LOG("try_add_candidate_mol_to_cluster: checking is_mol_clustered\n");
     VTR_ASSERT(!cluster_legalizer.is_mol_clustered(candidate_mol));
-    VTR_LOG("try_add_candidate_mol_to_cluster: checking legalization_cluster_id\n");
+    // VTR_LOG("try_add_candidate_mol_to_cluster: checking legalization_cluster_id\n");
     VTR_ASSERT(legalization_cluster_id.is_valid());
 
-    VTR_LOG("try_add_candidate_mol_to_cluster: accessing atom_block_ids\n");
+    // VTR_LOG("try_add_candidate_mol_to_cluster: accessing atom_block_ids\n");
     AtomBlockId blk_id = candidate_mol->atom_block_ids[candidate_mol->root];
-    VTR_LOG("try_add_candidate_mol_to_cluster: checking blk_id valid\n");
+    // VTR_LOG("try_add_candidate_mol_to_cluster: checking blk_id valid\n");
     VTR_ASSERT(blk_id.is_valid());
-    VTR_LOG("try_add_candidate_mol_to_cluster: getting block name\n");
-    // std::string blk_name = atom_netlist_.block_name(blk_id);
-    const auto& blk_name_ref = atom_netlist_.block_name(blk_id);
-    VTR_LOG("try_add_candidate_mol_to_cluster: got block name ref\n");
-    std::string blk_name = blk_name_ref;
-    VTR_LOG("try_add_candidate_mol_to_cluster: copied block name: %s\n", blk_name.c_str());
+    // VTR_LOG("try_add_candidate_mol_to_cluster: getting block name\n");
+    std::string blk_name = atom_netlist_.block_name(blk_id);
+    // VTR_LOG("try_add_candidate_mol_to_cluster: copied block name: %s\n", blk_name.c_str());
 
-    VTR_LOG("try_add_candidate_mol_to_cluster: checking pack_pattern %p\n", candidate_mol->pack_pattern);
-    if (candidate_mol->pack_pattern) {
-        VTR_LOG("try_add_candidate_mol_to_cluster: pack_pattern name: %s\n", candidate_mol->pack_pattern->name);
-    } else {
-        VTR_LOG("try_add_candidate_mol_to_cluster: pack_pattern is NULL\n");
-    }
+    // VTR_LOG("try_add_candidate_mol_to_cluster: checking pack_pattern %p\n", candidate_mol->pack_pattern);
+    // if (candidate_mol->pack_pattern) {
+    //     VTR_LOG("try_add_candidate_mol_to_cluster: pack_pattern name: %s\n", candidate_mol->pack_pattern->name);
+    // } else {
+    //     VTR_LOG("try_add_candidate_mol_to_cluster: pack_pattern is NULL\n");
+    // }
 
-    VTR_LOG("Attempting to add candidate molecule %s (root: %s) to cluster\n",
-            (candidate_mol->pack_pattern ? candidate_mol->pack_pattern->name : "NULL"),
-            blk_name.c_str());
+    // VTR_LOG("Attempting to add candidate molecule %s (root: %s) to cluster\n",
+    //         (candidate_mol->pack_pattern ? candidate_mol->pack_pattern->name : "NULL"),
+    //         blk_name.c_str());
 
     e_block_pack_status pack_status = cluster_legalizer.add_mol_to_cluster(candidate_mol,
                                                                            legalization_cluster_id);

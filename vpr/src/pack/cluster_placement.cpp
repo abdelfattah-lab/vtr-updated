@@ -18,6 +18,8 @@
  */
 
 #include "cluster_placement.h"
+#include "cluster_legalizer.h"
+#include "cluster_profiler.h"
 #include "hash.h"
 #include "physical_types.h"
 #include "vpr_types.h"
@@ -213,7 +215,8 @@ bool get_next_primitive_list(t_intra_cluster_placement_stats* cluster_placement_
     for (i = 0; i < cluster_placement_stats->num_pb_types; i++) {
         if (!cluster_placement_stats->valid_primitives[i].empty()) {
             t_cluster_placement_primitive* cur_cluster_placement_primitive = cluster_placement_stats->valid_primitives[i].begin()->second;
-            if (primitive_type_feasible(molecule->atom_block_ids[molecule->root], cur_cluster_placement_primitive->pb_graph_node->pb_type)) {
+            bool feasible = primitive_type_feasible(molecule->atom_block_ids[molecule->root], cur_cluster_placement_primitive->pb_graph_node->pb_type);
+            if (feasible) {
                 // Iterate over the unordered_multimap of the valid primitives of a specific pb primitive type
                 for (auto it = cluster_placement_stats->valid_primitives[i].begin(); it != cluster_placement_stats->valid_primitives[i].end(); /*loop increment is done inside the loop*/) {
                     //Lazily remove invalid primitives
@@ -249,6 +252,8 @@ bool get_next_primitive_list(t_intra_cluster_placement_stats* cluster_placement_
                     }
 
                     /* try place molecule at root location cur */
+                    CLUSTER_PROFILE_PRIMITIVE_CANDIDATE(molecule->is_chain());
+                    CLUSTER_PROFILE_PRIMITIVE_CANDIDATE_BY_TYPE(it->second->pb_graph_node->pb_type->name);
                     cost = try_place_molecule(cluster_placement_stats,
                                               molecule,
                                               it->second->pb_graph_node,
@@ -488,12 +493,14 @@ static float try_place_molecule(t_intra_cluster_placement_stats* cluster_placeme
             cost = root_placement_primitive->base_cost
                    + root_placement_primitive->incremental_cost;
             primitives_list[molecule->root] = root;
+
             if (molecule->type == MOLECULE_FORCED_PACK) {
                 if (!expand_forced_pack_molecule_placement(cluster_placement_stats,
                                                            molecule,
                                                            molecule->pack_pattern->root_block,
                                                            primitives_list,
                                                            &cost)) {
+                    CLUSTER_PROFILE_EXPANSION_FAILURE();
                     return HUGE_POSITIVE_FLOAT;
                 }
             }

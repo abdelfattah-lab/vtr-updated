@@ -80,6 +80,7 @@ void alloc_and_load_echo_file_info() {
     //Packing
     setEchoFileName(E_ECHO_CLUSTERS, "clusters.echo");
     setEchoFileName(E_ECHO_CHAIN_CLUSTERS, "chain_clusters.echo");
+    setEchoFileName(E_ECHO_CLUSTERING_PROFILE, "clustering_profile.echo");
 
     //Legalizer
     setEchoFileName(E_ECHO_FLAT_PLACE, "post_legalizer_flat_placement.echo");
