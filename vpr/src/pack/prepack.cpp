@@ -974,10 +974,37 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                             atom_nlist.create_pin(cin_port_id, 0, cin_driver_net, PinType::SINK, false);
                         }
 
-                        // Connect A and B to ground (for pass-through behavior: A=0, B=0 makes SUM=CIN)
-                        if (a_port_id) {
+                        // Connect A to row0_blk's sumout for cross-row cascaded connection
+                        // This implements: row0[i].sumout -> row1[39-i].a
+                        if (a_port_id && sumout_model_port) {
+                            AtomPortId row0_sumout_port = atom_nlist.find_atom_port(row0_blk, sumout_model_port);
+                            AtomNetId row0_sumout_net;
+                            if (row0_sumout_port) {
+                                row0_sumout_net = atom_nlist.port_net(row0_sumout_port, 0);
+                            }
+                            if (row0_sumout_net) {
+                                // Connect to existing row0 sumout net
+                                atom_nlist.create_pin(a_port_id, 0, row0_sumout_net, PinType::SINK, false);
+                            } else {
+                                // Row0 block doesn't have sumout connected yet - create the net
+                                // and connect both row0's sumout (driver) and our 'a' (sink)
+                                std::string row0_sumout_net_name = atom_nlist.block_name(row0_blk) + "_sumout";
+                                row0_sumout_net = atom_nlist.create_net(row0_sumout_net_name);
+                                if (!row0_sumout_port) {
+                                    row0_sumout_port = atom_nlist.create_port(row0_blk, sumout_model_port);
+                                }
+                                // Add driver pin from row0's sumout
+                                if (!atom_nlist.net_driver(row0_sumout_net)) {
+                                    atom_nlist.create_pin(row0_sumout_port, 0, row0_sumout_net, PinType::DRIVER, false);
+                                }
+                                // Add sink pin to our 'a' input
+                                atom_nlist.create_pin(a_port_id, 0, row0_sumout_net, PinType::SINK, false);
+                            }
+                        } else if (a_port_id) {
+                            // Fallback: no sumout port available, connect to ground
                             atom_nlist.create_pin(a_port_id, 0, gnd_net_id, PinType::SINK, false);
                         }
+                        // Connect B to ground
                         if (b_port_id) {
                             atom_nlist.create_pin(b_port_id, 0, gnd_net_id, PinType::SINK, false);
                         }
@@ -1180,11 +1207,28 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                             }
                         }
 
-                        // Create SUMOUT net (for sumout connections between rows)
+                        // Create SUMOUT net and connect to row1_blk's 'a' input for cross-row cascaded connection
+                        // This implements: row0[i].sumout -> row1[39-i].a
                         if (sumout_port_id) {
                             std::string sumout_net_name = atom_nlist.block_name(new_blk_id) + "_sumout";
                             AtomNetId sumout_net = atom_nlist.create_net(sumout_net_name);
                             atom_nlist.create_pin(sumout_port_id, 0, sumout_net, PinType::DRIVER, false);
+
+                            // Connect row1_blk's 'a' input to this sumout net
+                            if (a_model_port) {
+                                AtomPortId row1_a_port = atom_nlist.find_atom_port(row1_blk, a_model_port);
+                                if (!row1_a_port) {
+                                    row1_a_port = atom_nlist.create_port(row1_blk, a_model_port);
+                                }
+                                AtomPinId row1_a_pin = atom_nlist.port_pin(row1_a_port, 0);
+                                if (row1_a_pin) {
+                                    // Rewire existing 'a' pin to our sumout net
+                                    atom_nlist.set_pin_net(row1_a_pin, PinType::SINK, sumout_net);
+                                } else {
+                                    // Create new pin connected to our sumout net
+                                    atom_nlist.create_pin(row1_a_port, 0, sumout_net, PinType::SINK, false);
+                                }
+                            }
                         }
 
                         // 3. Update Molecule
