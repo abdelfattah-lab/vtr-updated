@@ -17,6 +17,7 @@
 #include <cstring>
 #include <map>
 #include <queue>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -1008,12 +1009,18 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                                 // We must disconnect its cin from whatever it was connected to (e.g. gnd)
                                 // and connect it to our new cout net.
                                 AtomPortId next_cin_port = atom_nlist.find_atom_port(next_blk, cin_model_port);
-                                if (next_cin_port) {
-                                    AtomPinId next_cin_pin = atom_nlist.port_pin(next_cin_port, 0);
-                                    if (next_cin_pin) {
-                                        // set_pin_net automatically removes the previous connection
-                                        atom_nlist.set_pin_net(next_cin_pin, PinType::SINK, cout_net);
-                                    }
+                                if (!next_cin_port) {
+                                    // Downstream block doesn't have a cin port (e.g., dummy output).
+                                    // Create one so we can connect to it.
+                                    next_cin_port = atom_nlist.create_port(next_blk, cin_model_port);
+                                }
+                                AtomPinId next_cin_pin = atom_nlist.port_pin(next_cin_port, 0);
+                                if (next_cin_pin) {
+                                    // set_pin_net automatically removes the previous connection
+                                    atom_nlist.set_pin_net(next_cin_pin, PinType::SINK, cout_net);
+                                } else {
+                                    // No existing pin, create one connected to our cout net
+                                    atom_nlist.create_pin(next_cin_port, 0, cout_net, PinType::SINK, false);
                                 }
                             }
                         }
@@ -1157,12 +1164,18 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                                 // We must disconnect its cin from whatever it was connected to (e.g. gnd)
                                 // and connect it to our new cout net.
                                 AtomPortId next_cin_port = atom_nlist.find_atom_port(next_blk, cin_model_port);
-                                if (next_cin_port) {
-                                    AtomPinId next_cin_pin = atom_nlist.port_pin(next_cin_port, 0);
-                                    if (next_cin_pin) {
-                                        // set_pin_net automatically removes the previous connection
-                                        atom_nlist.set_pin_net(next_cin_pin, PinType::SINK, cout_net);
-                                    }
+                                if (!next_cin_port) {
+                                    // Downstream block doesn't have a cin port (e.g., dummy output).
+                                    // Create one so we can connect to it.
+                                    next_cin_port = atom_nlist.create_port(next_blk, cin_model_port);
+                                }
+                                AtomPinId next_cin_pin = atom_nlist.port_pin(next_cin_port, 0);
+                                if (next_cin_pin) {
+                                    // set_pin_net automatically removes the previous connection
+                                    atom_nlist.set_pin_net(next_cin_pin, PinType::SINK, cout_net);
+                                } else {
+                                    // No existing pin, create one connected to our cout net
+                                    atom_nlist.create_pin(next_cin_port, 0, cout_net, PinType::SINK, false);
                                 }
                             }
                         }
@@ -2225,7 +2238,22 @@ static void update_chain_root_pins(t_pack_patterns* chain_pattern,
          */
         VTR_ASSERT(connected_primitive_pins.size());
 
-        primitive_input_pins.push_back(connected_primitive_pins);
+        // Deduplicate pins that represent equivalent positions across different modes.
+        // When multiple modes (e.g., arithmetic_1chain and arithmetic_2chains) have the
+        // same internal structure, get_all_connected_primitive_pins finds the same logical
+        // primitive through different mode paths. We keep only one representative by
+        // using the pin's string representation as a key.
+        std::set<std::string> seen_pins;
+        std::vector<t_pb_graph_pin*> unique_pins;
+        for (auto* pin : connected_primitive_pins) {
+            std::string pin_str = pin->to_string();
+            if (seen_pins.find(pin_str) == seen_pins.end()) {
+                seen_pins.insert(pin_str);
+                unique_pins.push_back(pin);
+            }
+        }
+
+        primitive_input_pins.push_back(unique_pins);
     }
 
     chain_pattern->chain_root_pins = primitive_input_pins;
@@ -2241,6 +2269,8 @@ static void update_chain_root_pins(t_pack_patterns* chain_pattern,
 static void get_all_connected_primitive_pins(const t_pb_graph_pin* cluster_input_pin, std::vector<t_pb_graph_pin*>& connected_primitive_pins, int pattern_id) {
     for (int iedge = 0; iedge < cluster_input_pin->num_output_edges; iedge++) {
         const auto& output_edge = cluster_input_pin->output_edges[iedge];
+        // TODO: Enabling this filter causes failures with some architectures.
+        // The issue is that not all edges along the path have pattern annotations.
         // if (!output_edge->belongs_to_pattern(pattern_id)) continue;
 
         for (int ipin = 0; ipin < output_edge->num_output_pins; ipin++) {
@@ -2310,11 +2340,6 @@ static void init_molecule_chain_info(const AtomBlockId blk_id,
         // For same-pattern transitions, returns -1 to defer to chain_info->chain_id
         molecule->required_entry_chain_id = determine_upstream_exit_chain_id(
             molecule, prev_molecule, driver_atom_id);
-
-        // if the two molecules are of different types
-        if (prev_molecule->pack_pattern->chain_root_pins.size() < molecule->pack_pattern->chain_root_pins.size()) {
-            molecule->chain_info->chain_id = get_forced_chain_id(molecule, prev_molecule, driver_atom_id);
-        }
     }
 }
 
@@ -2737,6 +2762,7 @@ static int determine_upstream_exit_chain_id(const t_pack_molecule* molecule,
                                             const AtomBlockId driver_atom_id) {
     // Get prev_molecule's exit pins
     if (!prev_molecule->pack_pattern) return -1;
+    if (!molecule->pack_pattern) return -1;
     const auto& exit_pins = prev_molecule->pack_pattern->chain_exit_pins;
     if (exit_pins.empty()) return -1;
 
