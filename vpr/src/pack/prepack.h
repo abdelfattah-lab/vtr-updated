@@ -63,10 +63,15 @@ public:
      * Initializes the prepacker by performing prepacking and allocating the
      * necessary data strucutres.
      *
-     *  @param atom_nlist           The atom netlist to prepack.
-     *  @param logical_block_types  A list of the logical block types on the device.
+     *  @param atom_nlist                   The atom netlist to prepack.
+     *  @param logical_block_types          A list of the logical block types on the device.
+     *  @param skip_fill_vacant_chain_spots If true, skip creating pass-through atoms for
+     *                                      cascaded carry chains. Use this when loading from
+     *                                      a .net file where pass-throughs already exist.
      */
-    void init(const AtomNetlist& atom_nlist, const std::vector<t_logical_block_type> &logical_block_types);
+    void init(const AtomNetlist& atom_nlist,
+              const std::vector<t_logical_block_type>& logical_block_types,
+              bool skip_fill_vacant_chain_spots = false);
 
     /**
      * @brief Get the cluster molecule containing the given atom block.

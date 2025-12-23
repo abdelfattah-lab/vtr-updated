@@ -704,14 +704,14 @@ void vpr_load_packing(t_vpr_setup& vpr_setup, const t_arch& arch) {
     const AtomContext& atom_ctx = g_vpr_ctx.atom();
     const DeviceContext& device_ctx = g_vpr_ctx.device();
 
-    // Run prepacking to create any pass-through atoms that may have been added
-    // during the original packing. These atoms exist in the .net file but not
-    // in the original .blif, so we need to recreate them before loading.
+    // Run prepacking to create molecules for the atoms in the netlist.
+    // We skip fill_vacant_chain_spots because pass-through atoms already exist
+    // in the .net file from the original packing - we don't want to create duplicates.
     // The molecules created here are not used (we already have the packed result),
-    // but the atoms and nets must exist in the atom netlist for .net validation.
-    VTR_LOG("Running prepacker to recreate pass-through atoms...\n");
+    // but prepacking is needed to properly set up internal data structures.
+    VTR_LOG("Running prepacker (skipping pass-through creation)...\n");
     Prepacker prepacker;
-    prepacker.init(atom_ctx.nlist, device_ctx.logical_block_types);
+    prepacker.init(atom_ctx.nlist, device_ctx.logical_block_types, /*skip_fill_vacant_chain_spots=*/true);
 
     // Rebuild timing graph to reflect any netlist modifications from prepacking
     if (vpr_setup.TimingEnabled) {

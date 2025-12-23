@@ -1250,7 +1250,8 @@ static t_pack_molecule* alloc_and_load_pack_molecules(t_pack_patterns* list_of_p
                                                       const int num_packing_patterns,
                                                       std::multimap<AtomBlockId, t_pack_molecule*>& atom_molecules,
                                                       const AtomNetlist& atom_nlist,
-                                                      const std::vector<t_logical_block_type>& logical_block_types) {
+                                                      const std::vector<t_logical_block_type>& logical_block_types,
+                                                      bool skip_fill_vacant_chain_spots) {
     int i, j, best_pattern;
     t_pack_molecule* list_of_molecules_head;
     t_pack_molecule* cur_molecule;
@@ -1346,36 +1347,40 @@ static t_pack_molecule* alloc_and_load_pack_molecules(t_pack_patterns* list_of_p
         }
     }
 
-    fill_vacant_chain_spots(list_of_molecules_head, list_of_pack_patterns, num_packing_patterns, atom_molecules);
+    // Fill vacant chain spots with pass-through atoms for cascaded carry chains.
+    // This is skipped when loading from a .net file where pass-throughs already exist.
+    if (!skip_fill_vacant_chain_spots) {
+        fill_vacant_chain_spots(list_of_molecules_head, list_of_pack_patterns, num_packing_patterns, atom_molecules);
 
-    // After fill_vacant_chain_spots, we need to compress the atom netlist.
-    // fill_vacant_chain_spots calls set_pin_net() which internally calls remove_net_pin(),
-    // marking the netlist as dirty. We must compress to clean it up before clustering.
-    auto& mutable_atom_ctx = g_vpr_ctx.mutable_atom();
-    AtomNetlist& mutable_atom_nlist = mutable_atom_ctx.nlist;
-    auto id_remapper = mutable_atom_nlist.compress();
+        // After fill_vacant_chain_spots, we need to compress the atom netlist.
+        // fill_vacant_chain_spots calls set_pin_net() which internally calls remove_net_pin(),
+        // marking the netlist as dirty. We must compress to clean it up before clustering.
+        auto& mutable_atom_ctx = g_vpr_ctx.mutable_atom();
+        AtomNetlist& mutable_atom_nlist = mutable_atom_ctx.nlist;
+        auto id_remapper = mutable_atom_nlist.compress();
 
-    // Update all AtomBlockIds in molecules using the remapper, since compress() may renumber IDs
-    t_pack_molecule* cur_mol = list_of_molecules_head;
-    while (cur_mol != nullptr) {
-        for (size_t i = 0; i < cur_mol->atom_block_ids.size(); i++) {
-            AtomBlockId old_id = cur_mol->atom_block_ids[i];
-            if (old_id) {
-                AtomBlockId new_id = id_remapper.new_block_id(old_id);
-                cur_mol->atom_block_ids[i] = new_id;
+        // Update all AtomBlockIds in molecules using the remapper, since compress() may renumber IDs
+        t_pack_molecule* cur_mol = list_of_molecules_head;
+        while (cur_mol != nullptr) {
+            for (size_t i = 0; i < cur_mol->atom_block_ids.size(); i++) {
+                AtomBlockId old_id = cur_mol->atom_block_ids[i];
+                if (old_id) {
+                    AtomBlockId new_id = id_remapper.new_block_id(old_id);
+                    cur_mol->atom_block_ids[i] = new_id;
+                }
             }
+            cur_mol = cur_mol->next;
         }
-        cur_mol = cur_mol->next;
-    }
 
-    // Update the atom_molecules multimap with remapped IDs
-    std::multimap<AtomBlockId, t_pack_molecule*> remapped_atom_molecules;
-    for (auto& pair : atom_molecules) {
-        AtomBlockId old_id = pair.first;
-        AtomBlockId new_id = id_remapper.new_block_id(old_id);
-        remapped_atom_molecules.insert({new_id, pair.second});
+        // Update the atom_molecules multimap with remapped IDs
+        std::multimap<AtomBlockId, t_pack_molecule*> remapped_atom_molecules;
+        for (auto& pair : atom_molecules) {
+            AtomBlockId old_id = pair.first;
+            AtomBlockId new_id = id_remapper.new_block_id(old_id);
+            remapped_atom_molecules.insert({new_id, pair.second});
+        }
+        atom_molecules = std::move(remapped_atom_molecules);
     }
-    atom_molecules = std::move(remapped_atom_molecules);
 
     if (getEchoEnabled() && isEchoFileEnabled(E_ECHO_PRE_PACKING_MOLECULES_AND_PATTERNS)) {
         print_pack_molecules(getEchoFileName(E_ECHO_PRE_PACKING_MOLECULES_AND_PATTERNS),
@@ -2421,7 +2426,9 @@ static void free_pack_molecules(t_pack_molecule* list_of_pack_molecules) {
     }
 }
 
-void Prepacker::init(const AtomNetlist& atom_nlist, const std::vector<t_logical_block_type>& logical_block_types) {
+void Prepacker::init(const AtomNetlist& atom_nlist,
+                     const std::vector<t_logical_block_type>& logical_block_types,
+                     bool skip_fill_vacant_chain_spots) {
     VTR_ASSERT(list_of_pack_molecules == nullptr && "Prepacker cannot be initialized twice.");
 
     // Allocate the pack patterns from the logical block types.
@@ -2437,7 +2444,8 @@ void Prepacker::init(const AtomNetlist& atom_nlist, const std::vector<t_logical_
                                                            list_of_pack_patterns.size(),
                                                            atom_molecules_multimap,
                                                            atom_nlist,
-                                                           logical_block_types);
+                                                           logical_block_types,
+                                                           skip_fill_vacant_chain_spots);
 
     // After alloc_and_load_pack_molecules returns, the netlist may have been compressed
     // (due to fill_vacant_chain_spots calling set_pin_net which marks it dirty).
