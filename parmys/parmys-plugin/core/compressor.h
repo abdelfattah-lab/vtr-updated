@@ -10,8 +10,12 @@
 #include "odin_types.h"
 
 enum class compressor_tree_type_e {
-    WALLACE, // Wallace tree
-    DADDA    // Dadda tree
+    WALLACE,             // Wallace tree - reduces to max rank height 2, then binary adder
+    WALLACE_TERNARY,     // Wallace tree for ternary adders - reduces to max rank height 3, then ternary adder chain
+    WALLACE_TERNARY_EXP, // Experimental: Wallace ternary with HA preference to preserve height 3
+    DADDA,               // Dadda tree
+    CASCADE,             // Cascade-friendly sequential accumulation for double-carry-chain architectures
+    TERNARY_TREE         // Ternary adder tree for DCC3 chain topology - groups 3 inputs using sumout→input chaining
 };
 
 // Implement the compressor tree according to the specified type.

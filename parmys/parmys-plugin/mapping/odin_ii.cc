@@ -59,6 +59,7 @@ void set_default_config()
     configuration.split_hard_multiplier = 0;
     configuration.ignore_new_compressors = false;
     configuration.soft_multiplier_adders = false;
+    configuration.ternary_adder_dp = false;
     configuration.compressor_tree_type = compressor_tree_type_e::WALLACE;
     
     configuration.split_memory_width = 0;

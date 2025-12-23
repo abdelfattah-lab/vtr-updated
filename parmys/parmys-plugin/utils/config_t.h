@@ -44,6 +44,8 @@ struct config_t {
     bool ignore_new_compressors;
     // Set to True to use cascading adders to implement soft multiplication; else use compressor trees (default).
     bool soft_multiplier_adders;
+    // Set to True to use ternary DP (3D) for constant multiplication - finds optimal triplets for ternary adder chains.
+    bool ternary_adder_dp;
     // Define the compressor tree type, if compressor trees are used. Default: Wallace
     compressor_tree_type_e compressor_tree_type;
 

@@ -866,10 +866,20 @@ struct ParMYSPass : public Pass {
         log("        Tells Parmys to connect the first cin in an adder/subtractor chain to a global gnd/vdd net.\n");
         log("\n");
         log("    -soft_multiplier_adders\n");
-        log("        Tells Parmys to use cascading adder chains if present, else a compressor tree, to implement soft multiplication.\n");
+        log("        Tells Parmys to use cascading adder chains (binary DP) to implement soft multiplication.\n");
+        log("\n");
+        log("    -ternary_adder_dp\n");
+        log("        Tells Parmys to use ternary DP to find optimal triplets for ternary adder chains (A+B)+C.\n");
+        log("        This is optimized for architectures with ternary adder support (e.g., DCC3).\n");
         log("\n");
         log("    -compressor_tree_type string_value\n");
-        log("        Specify the compressor tree type to use ('wallace', 'dadda'). Default: 'wallace'\n");
+        log("        Specify the compressor tree type to use. Default: 'wallace'\n");
+        log("        'wallace'             - Standard Wallace tree, reduces to height 2, then binary adder.\n");
+        log("        'wallace_ternary'     - Wallace tree for ternary adders, reduces to height 3, then (A+B)+C chain.\n");
+        log("        'wallace_ternary_exp' - Experimental: prefers HA over FA to preserve height 3.\n");
+        log("        'dadda'               - Dadda tree reduction.\n");
+        log("        'cascade'             - Sequential accumulation for double-carry-chain architectures.\n");
+        log("        'ternary'             - Ternary adder tree with sumout->input chaining for DCC3 architectures.\n");
         log("\n");
     }
     void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -937,20 +947,36 @@ struct ParMYSPass : public Pass {
                 configuration.soft_multiplier_adders = true;
                 continue;
             }
+            if (args[argidx] == "-ternary_adder_dp") {
+                configuration.ternary_adder_dp = true;
+                continue;
+            }
             if (args[argidx] == "-compressor_tree_type" && argidx + 1 < args.size()) {
                 std::string tree_type_str = args[++argidx];
                 if (tree_type_str == "wallace") {
                     configuration.compressor_tree_type = compressor_tree_type_e::WALLACE;
                 }
+                else if (tree_type_str == "wallace_ternary") {
+                    configuration.compressor_tree_type = compressor_tree_type_e::WALLACE_TERNARY;
+                }
+                else if (tree_type_str == "wallace_ternary_exp") {
+                    configuration.compressor_tree_type = compressor_tree_type_e::WALLACE_TERNARY_EXP;
+                }
                 else if (tree_type_str == "dadda") {
                     configuration.compressor_tree_type = compressor_tree_type_e::DADDA;
+                }
+                else if (tree_type_str == "cascade") {
+                    configuration.compressor_tree_type = compressor_tree_type_e::CASCADE;
+                }
+                else if (tree_type_str == "ternary") {
+                    configuration.compressor_tree_type = compressor_tree_type_e::TERNARY_TREE;
                 }
                 else if (tree_type_str == "old") {
                     configuration.ignore_new_compressors = true;
                 }
                 else {
                     log_error("Failed Parmys argument: Unrecognized tree type '%s' provided to -compressor_tree_type.\n", tree_type_str.c_str());
-                } 
+                }
             }
         }
         extra_args(args, argidx, design);
