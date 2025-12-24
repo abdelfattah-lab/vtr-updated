@@ -50,6 +50,7 @@
 #include "ast_util.h"
 #include "parmys_update.h"
 #include "parmys_utils.h"
+#include "synthesis_log.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -740,6 +741,9 @@ struct ParMYSPass : public Pass {
     {
         double elaboration_time = wall_time();
 
+        // Initialize synthesis logging early to capture $add cells during resolve
+        synthesis_log::init("synthesis_trace.log");
+
         /* Perform any initialization routines here */
         find_hard_multipliers();
         find_hard_adders();
@@ -761,6 +765,7 @@ struct ParMYSPass : public Pass {
         if (odin_netlist) {
             /* point for all netlist optimizations. */
             log("Performing Optimization on the Netlist\n");
+
             if (hard_multipliers) {
                 /* Perform a splitting of the multipliers for hard block mults */
                 reduce_operations(odin_netlist, MULTIPLY);
@@ -791,6 +796,9 @@ struct ParMYSPass : public Pass {
                 iterate_adders_for_sub(odin_netlist);
                 clean_adders_for_sub();
             }
+
+            // Close synthesis logging and write summary
+            synthesis_log::close();
         }
 
         optimization_time = wall_time() - optimization_time;

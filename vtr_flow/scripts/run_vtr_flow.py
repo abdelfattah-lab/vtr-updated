@@ -403,7 +403,21 @@ def vtr_command_argparser(prog=None):
         "-compressor_tree_type",
         default="wallace",
         dest="compressor_tree_type",
-        help="Specify the compressor tree type to use ('wallace', 'dadda'). Default: 'wallace'",
+        help="Specify the compressor tree type to use ('wallace', 'wallace_ternary', 'dadda', 'cascade', 'ternary'). Default: 'wallace'",
+    )
+    parmys.add_argument(
+        "-ternary_adder_dp",
+        default=False,
+        action="store_true",
+        dest="ternary_adder_dp",
+        help="Tells Parmys to use 3D dynamic programming to find optimal triplets for ternary adder chains in constant multiplication.",
+    )
+    parmys.add_argument(
+        "-ternary_adder_chains",
+        default=False,
+        action="store_true",
+        dest="ternary_adder_chains",
+        help="Tells Parmys to detect and convert consecutive $add cells into ternary adder chains (sumout->input pattern).",
     )
     #
     # VPR arguments
@@ -772,6 +786,7 @@ def process_parmys_args(args):
     parmys_args["adder_cin_global"] = args.adder_cin_global
     parmys_args["soft_multiplier_adders"] = args.soft_multiplier_adders
     parmys_args["compressor_tree_type"] = args.compressor_tree_type
+    parmys_args["ternary_adder_dp"] = args.ternary_adder_dp
     return parmys_args
 
 

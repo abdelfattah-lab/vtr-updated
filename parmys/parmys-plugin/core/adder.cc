@@ -787,6 +787,110 @@ void split_adder(nnode_t *nodeo, int a, int b, int sizea, int sizeb, int cin, in
 }
 
 /*-------------------------------------------------------------------------
+ * (function: is_pin_driven_by_adder_sumout)
+ *
+ * Check if a pin is driven by another adder's sumout.
+ * This is used to detect ternary chain patterns where one adder's
+ * result feeds another adder's input.
+ *-----------------------------------------------------------------------*/
+static bool is_pin_driven_by_adder_sumout(npin_t *pin)
+{
+    if (pin == NULL || pin->net == NULL)
+        return false;
+
+    nnet_t *net = pin->net;
+    if (net->num_driver_pins == 0 || net->driver_pins == NULL)
+        return false;
+
+    // Check the first driver pin
+    npin_t *driver_pin = net->driver_pins[0];
+    if (driver_pin == NULL || driver_pin->node == NULL)
+        return false;
+
+    nnode_t *driver = driver_pin->node;
+
+    // Check if driver is an ADD node and the pin is from sumout port
+    if (driver->type == ADD) {
+        // For ADD nodes, output port 0 is cout, port 1 is sumout
+        // The sumout pins start after the cout pins
+        int cout_size = driver->output_port_sizes[0];
+        int pin_idx = driver_pin->pin_node_idx;
+        if (pin_idx >= cout_size) {
+            return true;  // This is a sumout pin
+        }
+    }
+
+    return false;
+}
+
+/*-------------------------------------------------------------------------
+ * (function: swap_adder_ports_for_chain_pattern)
+ *
+ * For the DCC3 architecture, the pack pattern expects sumout to feed
+ * port B (adder[0].sumout -> adder[1].b). This function checks if
+ * port A is fed by another adder's sumout and swaps ports A and B
+ * so the pack pattern can recognize it.
+ *-----------------------------------------------------------------------*/
+static void swap_adder_ports_for_chain_pattern(nnode_t *node)
+{
+    if (node == NULL || node->type != ADD)
+        return;
+
+    int size_a = node->input_port_sizes[0];
+    int size_b = node->input_port_sizes[1];
+
+    // Count how many pins in port A are driven by adder sumout
+    int sumout_count_a = 0;
+    for (int i = 0; i < size_a; i++) {
+        if (is_pin_driven_by_adder_sumout(node->input_pins[i])) {
+            sumout_count_a++;
+        }
+    }
+
+    // Count how many pins in port B are driven by adder sumout
+    int sumout_count_b = 0;
+    for (int i = 0; i < size_b; i++) {
+        if (is_pin_driven_by_adder_sumout(node->input_pins[size_a + i])) {
+            sumout_count_b++;
+        }
+    }
+
+    // If port A has more sumout-driven pins than port B, swap the ports
+    // This ensures sumout feeds port B for the pack pattern
+    if (sumout_count_a > sumout_count_b) {
+        // Swap port sizes
+        node->input_port_sizes[0] = size_b;
+        node->input_port_sizes[1] = size_a;
+
+        // Swap pins - need temporary storage
+        int total_pins = size_a + size_b;
+        npin_t **temp_pins = (npin_t **)vtr::malloc(sizeof(npin_t *) * total_pins);
+
+        // Copy port B pins to temp (will become port A)
+        for (int i = 0; i < size_b; i++) {
+            temp_pins[i] = node->input_pins[size_a + i];
+            if (temp_pins[i] != NULL) {
+                temp_pins[i]->pin_node_idx = i;
+            }
+        }
+        // Copy port A pins to temp after port B (will become port B)
+        for (int i = 0; i < size_a; i++) {
+            temp_pins[size_b + i] = node->input_pins[i];
+            if (temp_pins[size_b + i] != NULL) {
+                temp_pins[size_b + i]->pin_node_idx = size_b + i;
+            }
+        }
+
+        // Copy back to node
+        for (int i = 0; i < total_pins; i++) {
+            node->input_pins[i] = temp_pins[i];
+        }
+
+        vtr::free(temp_pins);
+    }
+}
+
+/*-------------------------------------------------------------------------
  * (function: iterate_adders)
  *
  * This function will iterate over all of the add operations that
@@ -825,6 +929,9 @@ void iterate_adders(netlist_t *netlist)
             node->type = ADD;
 
         oassert(node->type == ADD);
+
+        // Swap ports if needed to ensure sumout feeds port B for chain pattern
+        swap_adder_ports_for_chain_pattern(node);
 
         a = node->input_port_sizes[0];
         b = node->input_port_sizes[1];

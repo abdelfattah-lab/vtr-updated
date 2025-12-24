@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,6 +35,7 @@
 
 #include "adder.h"
 #include "compressor.h"
+#include "synthesis_log.h"
 
 #include "vtr_list.h"
 #include "vtr_memory.h"
@@ -321,8 +323,10 @@ typedef struct reducesol_struct {
     int *add_pairs;
 
     /* solution metrics: */
-    // total number of adders used (after sharing).
-    int adder_count;
+    // actual number of adder operations (1 per binary pair).
+    int num_adders;
+    // sum of all adder output widths (for area estimation).
+    int total_bit_width;
     // total number of terms included.
     int terms_included;
 
@@ -547,15 +551,19 @@ reducesol_t *getFromMemo(reducesol_t **memo, int *row_indices, int size) {
     return NULL;
 }
 
-// get the strength (terms included / final adder count) of the solution.
-float getStrength(reducesol_t *sol) {
-    if (!sol->adder_count) return 0;
-    return ((float) sol->terms_included) / ((float) sol->adder_count);
+// get the cost of the solution (lower is better).
+// Primary: minimize number of adders. Secondary: minimize total bit-width.
+float getCost(reducesol_t *sol) {
+    if (!sol) return std::numeric_limits<float>::max();
+    // num_adders is primary, total_bit_width is tie-breaker (scaled down)
+    return (float)sol->num_adders + (float)sol->total_bit_width / 10000.0f;
 }
 
-// compare solutions and return true if best is to be updated.
+// compare solutions and return true if cur is better than best.
 bool solBetterThanBest(reducesol_t *best, reducesol_t *cur) {
-    return best == NULL || (getStrength(cur) >= getStrength(best));
+    if (best == NULL) return true;
+    if (cur == NULL) return false;
+    return getCost(cur) < getCost(best);
 }
 
 // recursive top-down helper function.
@@ -571,7 +579,7 @@ reducesol_t *getOptimalRowReductionHelper(reducesol_t **memo, adderinst_t ***add
     // base case: size is 2, i.e., must add both rows together.
     if (size == 2) {
         ret = (reducesol_t *) vtr::malloc(sizeof(reducesol_t));
-        
+
         // copy row indices and adder pairs.
         ret->row_indices = (int *) vtr::malloc(sizeof(int) * size);
         ret->add_pairs = (int *) vtr::malloc(sizeof(int) * size);
@@ -581,7 +589,8 @@ reducesol_t *getOptimalRowReductionHelper(reducesol_t **memo, adderinst_t ***add
 
         // calculate metrics.
         adderinst_t *adderinst = adderinst_mat[row_indices[0]][row_indices[1]];
-        ret->adder_count = adderinst->out_size;
+        ret->num_adders = 1;  // one binary adder operation
+        ret->total_bit_width = adderinst->out_size;
         ret->terms_included = adderinst->terms_included;
 
         return ret;
@@ -656,9 +665,10 @@ reducesol_t *getOptimalRowReductionHelper(reducesol_t **memo, adderinst_t ***add
             /* create a new solution, merged with current solution. */
             // initial metrics, based on cur.
             int termsIncluded = cur->terms_included;
-            int adderCount = cur->adder_count;
+            int numAdders = cur->num_adders;
+            int totalBitWidth = cur->total_bit_width;
 
-            // see if adder chain already exists.
+            // see if adder chain already exists (for adder sharing/reuse).
             bool adderExists = false;
             for (k = 0; k < subSize; k += 2) {
                 if (adderinst == adderinst_mat[cur->add_pairs[k]][cur->add_pairs[k+1]]) {
@@ -668,45 +678,50 @@ reducesol_t *getOptimalRowReductionHelper(reducesol_t **memo, adderinst_t ***add
                 }
             }
 
-            // add adder count if non-existent.
+            // add adder metrics if adder is new (not reused).
             if (!adderExists) {
-                adderCount += adderinst->out_size;
+                numAdders += 1;  // one new adder operation
+                totalBitWidth += adderinst->out_size;
             }
 
             // calculate terms included.
             termsIncluded += adderinst->terms_included;
 
-            // make new solution if best is not yet existent.
-            if (best == NULL) {
-                best = (reducesol_t *) vtr::malloc(sizeof(reducesol_t));
+            // create candidate solution.
+            reducesol_t *candidate = (reducesol_t *) vtr::malloc(sizeof(reducesol_t));
 
-                // copy row indices.
-                best->row_indices = (int *) vtr::malloc(sizeof(int) * size);
-                memcpy(best->row_indices, row_indices, sizeof(int) * size);
-                
-                // add adder pairs.
-                int *add_pairs = (int *) vtr::malloc(sizeof(int) * size);
-                memcpy(add_pairs + 2, cur->add_pairs, sizeof(int) * cur->size);
-                add_pairs[0] = r0;
-                add_pairs[1] = r1;
-                best->add_pairs = add_pairs;
+            // copy row indices.
+            candidate->row_indices = (int *) vtr::malloc(sizeof(int) * size);
+            memcpy(candidate->row_indices, row_indices, sizeof(int) * size);
 
-                // include metrics.
-                best->terms_included = termsIncluded;
-                best->adder_count = adderCount;
-                best->size = size;
+            // add adder pairs.
+            int *add_pairs = (int *) vtr::malloc(sizeof(int) * size);
+            memcpy(add_pairs + 2, cur->add_pairs, sizeof(int) * cur->size);
+            add_pairs[0] = r0;
+            add_pairs[1] = r1;
+            candidate->add_pairs = add_pairs;
 
-            }
-            else if (solBetterThanBest(best, cur)) {
-                // copy new adder pairs.
-                memcpy(best->add_pairs + 2, cur->add_pairs, sizeof(int) * cur->size);
-                best->add_pairs[0] = r0;
-                best->add_pairs[1] = r1;
+            // include metrics.
+            candidate->terms_included = termsIncluded;
+            candidate->num_adders = numAdders;
+            candidate->total_bit_width = totalBitWidth;
+            candidate->size = size;
+            candidate->next = NULL;
 
-                // update metrics.
-                best->adder_count = adderCount;
-                best->terms_included = termsIncluded;
-                
+            // compare with best and update if better.
+            if (solBetterThanBest(best, candidate)) {
+                // free old best if it exists
+                if (best != NULL) {
+                    vtr::free(best->row_indices);
+                    vtr::free(best->add_pairs);
+                    vtr::free(best);
+                }
+                best = candidate;
+            } else {
+                // free candidate
+                vtr::free(candidate->row_indices);
+                vtr::free(candidate->add_pairs);
+                vtr::free(candidate);
             }
         }
     }
@@ -1195,16 +1210,19 @@ static void freeTernarySolution(ternary_reducesol_t *sol) {
     vtr::free(sol);
 }
 
-// Get strength of a ternary solution (terms / adders)
-static float getTernaryStrength(ternary_reducesol_t *sol) {
-    if (!sol || !sol->adder_count) return 0.0f;
-    return ((float)sol->terms_included) / ((float)sol->adder_count);
+// Get cost of a ternary solution (lower is better).
+// Primary: minimize number of adders. Secondary: minimize total bit-width.
+static float getTernaryCost(ternary_reducesol_t *sol) {
+    if (!sol) return std::numeric_limits<float>::max();
+    // adder_count is primary, total_bit_width is tie-breaker (scaled down)
+    return (float)sol->adder_count + (float)sol->total_bit_width / 10000.0f;
 }
 
-// Compare solutions
+// Compare solutions - return true if cur is better than best.
 static bool ternarySolBetterThan(ternary_reducesol_t *cur, ternary_reducesol_t *best) {
     if (best == NULL) return true;
-    return getTernaryStrength(cur) >= getTernaryStrength(best);
+    if (cur == NULL) return false;
+    return getTernaryCost(cur) < getTernaryCost(best);
 }
 
 // Recursive ternary DP solver
@@ -1237,7 +1255,8 @@ static ternary_reducesol_t *getOptimalTernaryReductionHelper(
         sol->triplets = NULL;
         sol->num_pairs = 0;
         sol->pairs = NULL;
-        sol->adder_count = 0;
+        sol->adder_count = 0;  // no adder operations needed
+        sol->total_bit_width = 0;
         sol->terms_included = rows[row_indices[0]].size;
         memo[key] = sol;
         return sol;
@@ -1258,12 +1277,14 @@ static ternary_reducesol_t *getOptimalTernaryReductionHelper(
         sol->pairs[0] = row_indices[0];
         sol->pairs[1] = row_indices[1];
 
-        // Calculate adder size for this pair
+        // Calculate metrics for this pair
         int r0 = row_indices[0], r1 = row_indices[1];
         int min_shift = std::min(rows[r0].shift, rows[r1].shift);
         int max_end = std::max(rows[r0].shift + rows[r0].size,
                                rows[r1].shift + rows[r1].size);
-        sol->adder_count = max_end - min_shift + 1;
+        int output_width = max_end - min_shift + 1;
+        sol->adder_count = 1;  // one binary adder operation
+        sol->total_bit_width = output_width;
         sol->terms_included = rows[r0].size + rows[r1].size;
 
         memo[key] = sol;
@@ -1289,8 +1310,9 @@ static ternary_reducesol_t *getOptimalTernaryReductionHelper(
             sol->num_pairs = 0;
             sol->pairs = NULL;
 
-            // Calculate metrics - 2 adders for ternary chain
-            sol->adder_count = calcTernaryOutputWidth(rows, row_indices[0], row_indices[1], row_indices[2], order);
+            // Calculate metrics - 2 adders for ternary chain (A+B)+C
+            sol->adder_count = 2;  // two adder operations in the chain
+            sol->total_bit_width = calcTernaryOutputWidth(rows, row_indices[0], row_indices[1], row_indices[2], order);
             sol->terms_included = rows[row_indices[0]].size + rows[row_indices[1]].size + rows[row_indices[2]].size;
 
             if (ternarySolBetterThan(sol, best)) {
@@ -1332,12 +1354,14 @@ static ternary_reducesol_t *getOptimalTernaryReductionHelper(
                         rows, rowSize, remaining, size - 3, memo);
 
                     // Calculate combined metrics
-                    int ternary_adder_size = calcTernaryOutputWidth(rows, r0, r1, r2, order);
-                    int total_adders = ternary_adder_size;
+                    int ternary_bit_width = calcTernaryOutputWidth(rows, r0, r1, r2, order);
+                    int total_adders = 2;  // ternary chain = 2 adder operations
+                    int total_bit_width = ternary_bit_width;
                     int total_terms = rows[r0].size + rows[r1].size + rows[r2].size;
 
                     if (sub_sol) {
                         total_adders += sub_sol->adder_count;
+                        total_bit_width += sub_sol->total_bit_width;
                         total_terms += sub_sol->terms_included;
                     }
 
@@ -1370,6 +1394,7 @@ static ternary_reducesol_t *getOptimalTernaryReductionHelper(
                     }
 
                     sol->adder_count = total_adders;
+                    sol->total_bit_width = total_bit_width;
                     sol->terms_included = total_terms;
 
                     if (ternarySolBetterThan(sol, best)) {
@@ -1462,220 +1487,275 @@ static signal_list_t *implement_constant_multiplication_ternary_dp(nnode_t *node
     /* Shrink rows to actual size */
     rows = (row_t *)vtr::realloc(rows, sizeof(row_t) * rowSize);
 
-    /* Use ternary DP to find optimal reduction */
-    std::map<std::vector<int>, ternary_reducesol_t*> memo;
+    /* Iteratively reduce rows using ternary DP until only one row remains */
+    while (rowSize > 1) {
+        /* Use ternary DP to find optimal reduction for this iteration */
+        std::map<std::vector<int>, ternary_reducesol_t*> memo;
 
-    int *initial_indices = (int *)vtr::malloc(sizeof(int) * rowSize);
-    for (i = 0; i < rowSize; i++) {
-        initial_indices[i] = i;
-    }
-
-    ternary_reducesol_t *solution = getOptimalTernaryReductionHelper(rows, rowSize, initial_indices, rowSize, memo);
-    vtr::free(initial_indices);
-
-    /* Build the adder chains based on the solution */
-    // We'll iteratively combine rows according to the solution
-
-    // Process triplets first
-    for (int t = 0; t < solution->num_triplets; t++) {
-        int r0 = solution->triplets[t * 4 + 0];
-        int r1 = solution->triplets[t * 4 + 1];
-        int r2 = solution->triplets[t * 4 + 2];
-        int order = solution->triplets[t * 4 + 3];
-
-        // Determine which rows to add first based on chain order
-        int first_a, first_b, second_c;
-        switch (order) {
-            case 0: first_a = r0; first_b = r1; second_c = r2; break;
-            case 1: first_a = r0; first_b = r2; second_c = r1; break;
-            case 2: first_a = r1; first_b = r2; second_c = r0; break;
-            default: first_a = r0; first_b = r1; second_c = r2;
+        int *initial_indices = (int *)vtr::malloc(sizeof(int) * rowSize);
+        for (i = 0; i < rowSize; i++) {
+            initial_indices[i] = i;
         }
 
-        // Get row data
-        row_t *row_a = &rows[first_a];
-        row_t *row_b = &rows[first_b];
-        row_t *row_c = &rows[second_c];
+        ternary_reducesol_t *solution = getOptimalTernaryReductionHelper(rows, rowSize, initial_indices, rowSize, memo);
+        vtr::free(initial_indices);
 
-        // Calculate widths and shifts
-        int min_shift_ab = std::min(row_a->shift, row_b->shift);
-        int max_end_ab = std::max(row_a->shift + row_a->size, row_b->shift + row_b->size);
-        int width_ab = max_end_ab - min_shift_ab + 1;
+        // Log the DP solution
+        if (synthesis_log::enabled && solution) {
+            std::stringstream pairing_info;
+            pairing_info << "triplets=" << solution->num_triplets;
+            pairing_info << " pairs=" << solution->num_pairs;
+            if (solution->singleton >= 0) pairing_info << " singleton=row" << solution->singleton;
+            synthesis_log::log_dp_solution(
+                node->name ? node->name : "unnamed",
+                rowSize,
+                solution->adder_count,
+                solution->total_bit_width,
+                pairing_info.str()
+            );
+        }
 
-        // First adder: A + B
-        nnode_t *add1 = make_2port_gate(ADD, width_ab, width_ab, width_ab, node, mark);
-        add_list = insert_in_vptr_list(add_list, add1);
+        /* Build the adder chains based on the solution */
+        // Process triplets first
+        for (int t = 0; t < solution->num_triplets; t++) {
+            int r0 = solution->triplets[t * 4 + 0];
+            int r1 = solution->triplets[t * 4 + 1];
+            int r2 = solution->triplets[t * 4 + 2];
+            int order = solution->triplets[t * 4 + 3];
 
-        // Connect inputs to first adder
-        for (j = 0; j < width_ab; j++) {
-            int bit_pos = min_shift_ab + j;
-
-            // Port A
-            npin_t *pin_a;
-            if (bit_pos >= row_a->shift && bit_pos < row_a->shift + row_a->size) {
-                pin_a = row_a->pins[bit_pos - row_a->shift];
-            } else {
-                pin_a = get_zero_pin(netlist);
+            // Determine which rows to add first based on chain order
+            int first_a, first_b, second_c;
+            switch (order) {
+                case 0: first_a = r0; first_b = r1; second_c = r2; break;
+                case 1: first_a = r0; first_b = r2; second_c = r1; break;
+                case 2: first_a = r1; first_b = r2; second_c = r0; break;
+                default: first_a = r0; first_b = r1; second_c = r2;
             }
-            add_input_pin_to_node(add1, pin_a, j);
 
-            // Port B
-            npin_t *pin_b;
-            if (bit_pos >= row_b->shift && bit_pos < row_b->shift + row_b->size) {
-                pin_b = row_b->pins[bit_pos - row_b->shift];
-            } else {
-                pin_b = get_zero_pin(netlist);
+            // Get row data
+            row_t *row_a = &rows[first_a];
+            row_t *row_b = &rows[first_b];
+            row_t *row_c = &rows[second_c];
+
+            // Calculate widths and shifts
+            int min_shift_ab = std::min(row_a->shift, row_b->shift);
+            int max_end_ab = std::max(row_a->shift + row_a->size, row_b->shift + row_b->size);
+            int width_ab = max_end_ab - min_shift_ab + 1;
+
+            // First adder: A + B
+            nnode_t *add1 = make_2port_gate(ADD, width_ab, width_ab, width_ab, node, mark);
+            add_list = insert_in_vptr_list(add_list, add1);
+
+            // Connect inputs to first adder
+            for (j = 0; j < width_ab; j++) {
+                int bit_pos = min_shift_ab + j;
+
+                // Port A
+                npin_t *pin_a;
+                if (bit_pos >= row_a->shift && bit_pos < row_a->shift + row_a->size) {
+                    pin_a = row_a->pins[bit_pos - row_a->shift];
+                } else {
+                    pin_a = get_zero_pin(netlist);
+                }
+                add_input_pin_to_node(add1, pin_a, j);
+
+                // Port B
+                npin_t *pin_b;
+                if (bit_pos >= row_b->shift && bit_pos < row_b->shift + row_b->size) {
+                    pin_b = row_b->pins[bit_pos - row_b->shift];
+                } else {
+                    pin_b = get_zero_pin(netlist);
+                }
+                add_input_pin_to_node(add1, pin_b, width_ab + j);
             }
-            add_input_pin_to_node(add1, pin_b, width_ab + j);
-        }
 
-        // Get sumout from first adder
-        npin_t **sumout_ab = (npin_t **)vtr::malloc(sizeof(npin_t *) * width_ab);
-        for (j = 0; j < width_ab; j++) {
-            npin_t *out_pin = allocate_npin();
-            nnet_t *out_net = allocate_nnet();
-            add_output_pin_to_node(add1, out_pin, j);
-            add_driver_pin_to_net(out_net, out_pin);
-            out_net->name = make_full_ref_name(NULL, NULL, NULL, add1->name, j);
+            // Get sumout from first adder
+            npin_t **sumout_ab = (npin_t **)vtr::malloc(sizeof(npin_t *) * width_ab);
+            for (j = 0; j < width_ab; j++) {
+                npin_t *out_pin = allocate_npin();
+                nnet_t *out_net = allocate_nnet();
+                add_output_pin_to_node(add1, out_pin, j);
+                add_driver_pin_to_net(out_net, out_pin);
+                out_net->name = make_full_ref_name(NULL, NULL, NULL, add1->name, j);
 
-            npin_t *fanout_pin = allocate_npin();
-            add_fanout_pin_to_net(out_net, fanout_pin);
-            fanout_pin->name = out_net->name;
-            sumout_ab[j] = fanout_pin;
-        }
-
-        // Second adder: (A+B) + C
-        int min_shift_abc = std::min(min_shift_ab, row_c->shift);
-        int max_end_abc = std::max(min_shift_ab + width_ab, row_c->shift + row_c->size);
-        int width_abc = max_end_abc - min_shift_abc + 1;
-
-        nnode_t *add2 = make_2port_gate(ADD, width_abc, width_abc, width_abc, node, mark);
-        add_list = insert_in_vptr_list(add_list, add2);
-
-        // Connect inputs to second adder
-        for (j = 0; j < width_abc; j++) {
-            int bit_pos = min_shift_abc + j;
-
-            // Port A (sumout from first adder)
-            npin_t *pin_a;
-            if (bit_pos >= min_shift_ab && bit_pos < min_shift_ab + width_ab) {
-                pin_a = sumout_ab[bit_pos - min_shift_ab];
-            } else {
-                pin_a = get_zero_pin(netlist);
+                npin_t *fanout_pin = allocate_npin();
+                add_fanout_pin_to_net(out_net, fanout_pin);
+                fanout_pin->name = out_net->name;
+                sumout_ab[j] = fanout_pin;
             }
-            add_input_pin_to_node(add2, pin_a, j);
 
-            // Port B (row C)
-            npin_t *pin_b;
-            if (bit_pos >= row_c->shift && bit_pos < row_c->shift + row_c->size) {
-                pin_b = row_c->pins[bit_pos - row_c->shift];
-            } else {
-                pin_b = get_zero_pin(netlist);
+            // Second adder: (A+B) + C
+            int min_shift_abc = std::min(min_shift_ab, row_c->shift);
+            int max_end_abc = std::max(min_shift_ab + width_ab, row_c->shift + row_c->size);
+            int width_abc = max_end_abc - min_shift_abc + 1;
+
+            nnode_t *add2 = make_2port_gate(ADD, width_abc, width_abc, width_abc, node, mark);
+            add_list = insert_in_vptr_list(add_list, add2);
+
+            // Log the ternary chain structure
+            if (synthesis_log::enabled) {
+                std::vector<std::string> adder_names = {
+                    add1->name ? add1->name : "add1",
+                    add2->name ? add2->name : "add2"
+                };
+                std::vector<int> adder_widths = {width_ab, width_abc};
+                synthesis_log::log_adder_chain(
+                    node->name ? node->name : "unnamed",
+                    adder_names,
+                    adder_widths,
+                    "TERNARY_DP (A+B)+C"
+                );
             }
-            add_input_pin_to_node(add2, pin_b, width_abc + j);
-        }
 
-        // Store result back - update one of the rows with the output
-        // (For simplicity, we'll update row r0)
-        vtr::free(rows[r0].pins);
-        rows[r0].pins = (npin_t **)vtr::malloc(sizeof(npin_t *) * width_abc);
-        rows[r0].size = width_abc;
-        rows[r0].shift = min_shift_abc;
+            // Connect inputs to second adder
+            for (j = 0; j < width_abc; j++) {
+                int bit_pos = min_shift_abc + j;
 
-        for (j = 0; j < width_abc; j++) {
-            npin_t *out_pin = allocate_npin();
-            nnet_t *out_net = allocate_nnet();
-            add_output_pin_to_node(add2, out_pin, j);
-            add_driver_pin_to_net(out_net, out_pin);
-            out_net->name = make_full_ref_name(NULL, NULL, NULL, add2->name, j);
+                // Port A (sumout from first adder)
+                npin_t *pin_a;
+                if (bit_pos >= min_shift_ab && bit_pos < min_shift_ab + width_ab) {
+                    pin_a = sumout_ab[bit_pos - min_shift_ab];
+                } else {
+                    pin_a = get_zero_pin(netlist);
+                }
+                add_input_pin_to_node(add2, pin_a, j);
 
-            npin_t *fanout_pin = allocate_npin();
-            add_fanout_pin_to_net(out_net, fanout_pin);
-            fanout_pin->name = out_net->name;
-            rows[r0].pins[j] = fanout_pin;
-        }
-
-        // Mark r1 and r2 as consumed (set size to 0)
-        rows[r1].size = 0;
-        rows[r2].size = 0;
-
-        vtr::free(sumout_ab);
-    }
-
-    // Process any remaining pairs
-    for (int p = 0; p < solution->num_pairs; p++) {
-        int r0 = solution->pairs[p * 2 + 0];
-        int r1 = solution->pairs[p * 2 + 1];
-
-        row_t *row_a = &rows[r0];
-        row_t *row_b = &rows[r1];
-
-        int min_shift = std::min(row_a->shift, row_b->shift);
-        int max_end = std::max(row_a->shift + row_a->size, row_b->shift + row_b->size);
-        int width = max_end - min_shift + 1;
-
-        nnode_t *add_node = make_2port_gate(ADD, width, width, width, node, mark);
-        add_list = insert_in_vptr_list(add_list, add_node);
-
-        // Connect inputs
-        for (j = 0; j < width; j++) {
-            int bit_pos = min_shift + j;
-
-            npin_t *pin_a;
-            if (bit_pos >= row_a->shift && bit_pos < row_a->shift + row_a->size) {
-                pin_a = row_a->pins[bit_pos - row_a->shift];
-            } else {
-                pin_a = get_zero_pin(netlist);
+                // Port B (row C)
+                npin_t *pin_b;
+                if (bit_pos >= row_c->shift && bit_pos < row_c->shift + row_c->size) {
+                    pin_b = row_c->pins[bit_pos - row_c->shift];
+                } else {
+                    pin_b = get_zero_pin(netlist);
+                }
+                add_input_pin_to_node(add2, pin_b, width_abc + j);
             }
-            add_input_pin_to_node(add_node, pin_a, j);
 
-            npin_t *pin_b;
-            if (bit_pos >= row_b->shift && bit_pos < row_b->shift + row_b->size) {
-                pin_b = row_b->pins[bit_pos - row_b->shift];
-            } else {
-                pin_b = get_zero_pin(netlist);
+            // Store result back - update one of the rows with the output
+            // (For simplicity, we'll update row r0)
+            vtr::free(rows[r0].pins);
+            rows[r0].pins = (npin_t **)vtr::malloc(sizeof(npin_t *) * width_abc);
+            rows[r0].size = width_abc;
+            rows[r0].shift = min_shift_abc;
+
+            for (j = 0; j < width_abc; j++) {
+                npin_t *out_pin = allocate_npin();
+                nnet_t *out_net = allocate_nnet();
+                add_output_pin_to_node(add2, out_pin, j);
+                add_driver_pin_to_net(out_net, out_pin);
+                out_net->name = make_full_ref_name(NULL, NULL, NULL, add2->name, j);
+
+                npin_t *fanout_pin = allocate_npin();
+                add_fanout_pin_to_net(out_net, fanout_pin);
+                fanout_pin->name = out_net->name;
+                rows[r0].pins[j] = fanout_pin;
             }
-            add_input_pin_to_node(add_node, pin_b, width + j);
+
+            // Mark r1 and r2 as consumed (set size to 0)
+            rows[r1].size = 0;
+            rows[r2].size = 0;
+
+            vtr::free(sumout_ab);
         }
 
-        // Store result in r0
-        vtr::free(rows[r0].pins);
-        rows[r0].pins = (npin_t **)vtr::malloc(sizeof(npin_t *) * width);
-        rows[r0].size = width;
-        rows[r0].shift = min_shift;
+        // Process any remaining pairs
+        for (int p = 0; p < solution->num_pairs; p++) {
+            int r0 = solution->pairs[p * 2 + 0];
+            int r1 = solution->pairs[p * 2 + 1];
 
-        for (j = 0; j < width; j++) {
-            npin_t *out_pin = allocate_npin();
-            nnet_t *out_net = allocate_nnet();
-            add_output_pin_to_node(add_node, out_pin, j);
-            add_driver_pin_to_net(out_net, out_pin);
-            out_net->name = make_full_ref_name(NULL, NULL, NULL, add_node->name, j);
+            row_t *row_a = &rows[r0];
+            row_t *row_b = &rows[r1];
 
-            npin_t *fanout_pin = allocate_npin();
-            add_fanout_pin_to_net(out_net, fanout_pin);
-            fanout_pin->name = out_net->name;
-            rows[r0].pins[j] = fanout_pin;
+            int min_shift = std::min(row_a->shift, row_b->shift);
+            int max_end = std::max(row_a->shift + row_a->size, row_b->shift + row_b->size);
+            int width = max_end - min_shift + 1;
+
+            nnode_t *add_node = make_2port_gate(ADD, width, width, width, node, mark);
+            add_list = insert_in_vptr_list(add_list, add_node);
+
+            // Connect inputs
+            for (j = 0; j < width; j++) {
+                int bit_pos = min_shift + j;
+
+                npin_t *pin_a;
+                if (bit_pos >= row_a->shift && bit_pos < row_a->shift + row_a->size) {
+                    pin_a = row_a->pins[bit_pos - row_a->shift];
+                } else {
+                    pin_a = get_zero_pin(netlist);
+                }
+                add_input_pin_to_node(add_node, pin_a, j);
+
+                npin_t *pin_b;
+                if (bit_pos >= row_b->shift && bit_pos < row_b->shift + row_b->size) {
+                    pin_b = row_b->pins[bit_pos - row_b->shift];
+                } else {
+                    pin_b = get_zero_pin(netlist);
+                }
+                add_input_pin_to_node(add_node, pin_b, width + j);
+            }
+
+            // Store result in r0
+            vtr::free(rows[r0].pins);
+            rows[r0].pins = (npin_t **)vtr::malloc(sizeof(npin_t *) * width);
+            rows[r0].size = width;
+            rows[r0].shift = min_shift;
+
+            for (j = 0; j < width; j++) {
+                npin_t *out_pin = allocate_npin();
+                nnet_t *out_net = allocate_nnet();
+                add_output_pin_to_node(add_node, out_pin, j);
+                add_driver_pin_to_net(out_net, out_pin);
+                out_net->name = make_full_ref_name(NULL, NULL, NULL, add_node->name, j);
+
+                npin_t *fanout_pin = allocate_npin();
+                add_fanout_pin_to_net(out_net, fanout_pin);
+                fanout_pin->name = out_net->name;
+                rows[r0].pins[j] = fanout_pin;
+            }
+
+            rows[r1].size = 0;
         }
 
-        rows[r1].size = 0;
-    }
-
-    /* Find the final result row (the one with size > 0) */
-    int final_row = -1;
-    for (i = 0; i < rowSize; i++) {
-        if (rows[i].size > 0) {
-            final_row = i;
-            break;
+        /* Compact rows: remove consumed rows (size == 0) and rebuild array */
+        int new_rowSize = 0;
+        for (i = 0; i < rowSize; i++) {
+            if (rows[i].size > 0) {
+                new_rowSize++;
+            }
         }
-    }
 
-    /* Build output signal list */
+        if (new_rowSize < rowSize) {
+            row_t *new_rows = (row_t *)vtr::malloc(sizeof(row_t) * new_rowSize);
+            int new_idx = 0;
+            for (i = 0; i < rowSize; i++) {
+                if (rows[i].size > 0) {
+                    new_rows[new_idx++] = rows[i];
+                }
+                // Note: rows with size == 0 have already had their pins freed
+                // or transferred to other rows, so no cleanup needed here
+            }
+            vtr::free(rows);
+            rows = new_rows;
+            rowSize = new_rowSize;
+        }
+
+        /* Free memo entries for this iteration */
+        for (auto &entry : memo) {
+            if (entry.second) {
+                if (entry.second->row_indices) vtr::free(entry.second->row_indices);
+                if (entry.second->triplets) vtr::free(entry.second->triplets);
+                if (entry.second->pairs) vtr::free(entry.second->pairs);
+                vtr::free(entry.second);
+            }
+        }
+    } /* end while (rowSize > 1) */
+
+    /* Build output signal list from the single remaining row */
     signal_list_t *return_list = init_signal_list();
 
-    if (final_row >= 0) {
-        int shift = rows[final_row].shift;
-        int size = rows[final_row].size;
-        npin_t **pins = rows[final_row].pins;
+    if (rowSize == 1) {
+        int shift = rows[0].shift;
+        int size = rows[0].size;
+        npin_t **pins = rows[0].pins;
 
         for (i = 0; i < req_width; i++) {
             npin_t *pin;
@@ -1696,22 +1776,7 @@ static signal_list_t *implement_constant_multiplication_ternary_dp(nnode_t *node
     }
 
     /* Cleanup */
-    // Free remaining row pins
-    for (i = 0; i < rowSize; i++) {
-        if (i != final_row && rows[i].pins) {
-            vtr::free(rows[i].pins);
-        }
-    }
     vtr::free(rows);
-
-    // Free memo entries (solutions are stored in memo)
-    for (auto &entry : memo) {
-        if (entry.second) {
-            // Don't free row_indices/triplets/pairs as they may be shared
-            // Just free the solution struct
-            vtr::free(entry.second);
-        }
-    }
 
     return return_list;
 }
@@ -3236,18 +3301,42 @@ bool check_constant_multipication(nnode_t *node, uintptr_t traverse_mark_number,
     if ((is_const = is_constant_multipication(node, netlist)) != mult_port_stat_e::NOT_CONSTANT) {
         /* performaing optimization on the constant multiplication ports */
         node = perform_const_mult_optimization(is_const, node, traverse_mark_number, netlist);
+
+        // Extract constant value for logging
+        std::string const_value;
+        int const_port = (is_const == mult_port_stat_e::MULTIPICAND_CONSTANT) ? 1 : 0;
+        int const_width = node->input_port_sizes[const_port];
+        int const_offset = (const_port == 1) ? node->input_port_sizes[0] : 0;
+        for (int i = const_width - 1; i >= 0; i--) {
+            npin_t *pin = node->input_pins[const_offset + i];
+            if (!strcmp(pin->net->name, netlist->one_net->name)) {
+                const_value += "1";
+            } else {
+                const_value += "0";
+            }
+        }
+
+        int var_port = (is_const == mult_port_stat_e::MULTIPICAND_CONSTANT) ? 0 : 1;
+        int var_width = node->input_port_sizes[var_port];
+
         /* implementation of constant multiplication */
         signal_list_t *output_signals;
         if (configuration.ternary_adder_dp) {
             // use ternary DP to find optimal triplets for ternary adder chains.
+            synthesis_log::log_mult_decision(node, "CONST_MULT_TERNARY_DP",
+                                             var_width, const_width, "0b" + const_value);
             output_signals = implement_constant_multiplication_ternary_dp(node, is_const, static_cast<short>(traverse_mark_number), netlist);
         }
         else if (configuration.soft_multiplier_adders) {
             // use binary cascading adder chains (DP for pairs).
+            synthesis_log::log_mult_decision(node, "CONST_MULT_BINARY_DP",
+                                             var_width, const_width, "0b" + const_value);
             output_signals = implement_constant_multiplication_minimized_dp(node, is_const, static_cast<short>(traverse_mark_number), netlist);
         }
         else {
             // use a compressor tree.
+            synthesis_log::log_mult_decision(node, "CONST_MULT_COMPRESSOR",
+                                             var_width, const_width, "0b" + const_value);
             output_signals = implement_constant_multiplication_compressor_tree(node, is_const, static_cast<short>(traverse_mark_number), netlist);
         }
 

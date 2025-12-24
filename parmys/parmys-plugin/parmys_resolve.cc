@@ -28,6 +28,7 @@
 #include "multiplier.h"
 #include "parmys_resolve.h"
 #include "subtractor.h"
+#include "synthesis_log.h"
 
 #include "vtr_util.h"
 
@@ -147,6 +148,12 @@ static void resolve_arithmetic_nodes(nnode_t *node, uintptr_t traverse_mark_numb
         if (hard_adders) {
             node = check_missing_ports(node, traverse_mark_number, netlist);
         }
+
+        // Log original $add cells from Yosys (before multiplier-created adders are added)
+        synthesis_log::log_standalone_adder(node,
+            node->input_port_sizes[0],
+            node->input_port_sizes[1],
+            "FROM_YOSYS");
 
         add_list = insert_in_vptr_list(add_list, node);
         break;

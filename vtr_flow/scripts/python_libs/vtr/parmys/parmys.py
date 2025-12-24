@@ -57,7 +57,9 @@ def init_script_file(
     top_module='-auto-top',
     adder_cin_global=False,
     soft_multiplier_adders=False,
-    compressor_tree_type='wallace'
+    compressor_tree_type='wallace',
+    ternary_adder_dp=False,
+    ternary_adder_chains=False
 ):
     """initializing the raw yosys script file"""
     # specify the input files type
@@ -79,7 +81,8 @@ def init_script_file(
             "TOPMODULE": top_module,
             "ADDERCINGLOBAL": "-adder_cin_global" if adder_cin_global else "",
             "SOFTMULTIPLIERADDERS": "-soft_multiplier_adders" if soft_multiplier_adders else "",
-            "COMPRESSORTREETYPE": compressor_tree_type
+            "COMPRESSORTREETYPE": compressor_tree_type,
+            "TERNARYADDDP": "-ternary_adder_dp" if ternary_adder_dp else ""
         },
     )
 
@@ -247,7 +250,12 @@ def run(
     if ('compressor_tree_type' in parmys_args):
         compressor_tree_type = parmys_args['compressor_tree_type']
         del parmys_args['compressor_tree_type']
-    
+
+    ternary_adder_dp = False
+    if ('ternary_adder_dp' in parmys_args):
+        ternary_adder_dp = parmys_args['ternary_adder_dp']
+        del parmys_args['ternary_adder_dp']
+
     odin_base_config = str(vtr.paths.odin_cfg_path)
 
     # Copy the config file
@@ -275,7 +283,8 @@ def run(
         top_module=top_module,
         adder_cin_global=adder_cin_global,
         soft_multiplier_adders=soft_multiplier_adders,
-        compressor_tree_type=compressor_tree_type
+        compressor_tree_type=compressor_tree_type,
+        ternary_adder_dp=ternary_adder_dp
     )
 
     # set the parser

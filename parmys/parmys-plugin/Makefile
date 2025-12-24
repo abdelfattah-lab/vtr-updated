@@ -23,6 +23,8 @@ SOURCES = parmys.cc \
 		  parmys_utils.cc \
 		  parmys_resolve.cc \
 		  core/adder.cc \
+		  core/compressor.cc \
+		  core/synthesis_log.cc \
 		  utils/enum_str.cc \
 		  mapping/mixing_optimization.cc \
 		  utils/read_xml_config_file.cc \
