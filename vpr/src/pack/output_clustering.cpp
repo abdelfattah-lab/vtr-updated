@@ -248,26 +248,6 @@ static std::string clustering_xml_interconnect_text(t_logical_block_type_ptr typ
         const t_pb_graph_edge* edge = prev_pin->output_edges[prev_edge];
         char* name = edge->interconnect->name;
 
-        // Debug logging: track use of the DCC3 add2_input interconnect
-        // (connects lut4[0].out / arithmetic.in[4] to adder[1].a / adder[1].b).
-        // This fires only when a packed net actually uses that specific intra-cluster edge.
-        if (std::strcmp(name, "add2_input") == 0) {
-            const auto& atom_ctx = g_vpr_ctx.atom();
-            AtomNetId net = pb_route.at(inode).atom_net_id;
-            std::string net_name = net ? atom_ctx.nlist.net_name(net) : std::string("<no-net>");
-
-            VTR_LOG("ADD2_INPUT_USED net=%s src=%s[%d].%s[%d] sink=%s[%d].%s[%d]\n",
-                    net_name.c_str(),
-                    prev_pin->parent_node->pb_type->name,
-                    prev_pin->parent_node->placement_index,
-                    prev_pin->port->name,
-                    prev_pin->pin_number,
-                    cur_pin->parent_node->pb_type->name,
-                    cur_pin->parent_node->placement_index,
-                    cur_pin->port->name,
-                    cur_pin->pin_number);
-        }
-
         if (prev_pin->port->parent_pb_type->depth
             >= cur_pin->port->parent_pb_type->depth) {
             /* Connections from siblings or children should have an explicit index, connections from parent does not need an explicit index */

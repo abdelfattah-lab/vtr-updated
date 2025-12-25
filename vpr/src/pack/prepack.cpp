@@ -888,8 +888,6 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                     // Case 1: Row 0 occupied, Row 1 empty -> Fill Row 1
                     if (row0_blk && !row1_blk) {
                         // Found a vacant spot in row 1!
-                        VTR_LOG("Filling vacant spot in molecule for pattern %s at index %d (paired with %d)\n",
-                                cur_molecule->pack_pattern->name, row1_idx, row0_idx);
 
                         // 1. Create new block
                         std::string new_name = atom_nlist.block_name(row0_blk) + "_pass_through_" + std::to_string(row1_idx);
@@ -1069,8 +1067,6 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                     // Case 2: Row 1 occupied, Row 0 empty -> Fill Row 0
                     else if (!row0_blk && row1_blk) {
                         // Found a vacant spot in row 0!
-                        VTR_LOG("Filling vacant spot in molecule for pattern %s at index %d (paired with %d)\n",
-                                cur_molecule->pack_pattern->name, row0_idx, row1_idx);
 
                         // 1. Create new block
                         std::string new_name = atom_nlist.block_name(row1_blk) + "_pass_through_" + std::to_string(row0_idx);
@@ -1432,7 +1428,7 @@ static t_pack_molecule* try_create_molecule(t_pack_patterns* list_of_pack_patter
 
     // Debugging: trace attempts to create lut_chain / simple_lut_chain molecules
     std::string pattern_name(pack_pattern->name);
-    bool debug_lut_chain = true;
+    bool debug_lut_chain = false;
 
     t_pack_molecule* molecule;
 
@@ -1536,7 +1532,7 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
                                 const std::multimap<AtomBlockId, t_pack_molecule*>& atom_molecules,
                                 const AtomNetlist& atom_nlist) {
     std::string pattern_name(molecule->pack_pattern->name);
-    bool debug_lut_chain = pattern_name.find("lut_chain") != std::string::npos;
+    bool debug_lut_chain = false;
 
     bool has_second_level = false;
     bool found_second_level = false;
@@ -1669,18 +1665,7 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
     // chain instance. Hierarchical placement constraints are only applied
     // when a valid second-level candidate is actually present.
     if (!has_second_level && hierarchical_molecule) {
-        if (debug_lut_chain) {
-            VTR_LOG(
-                "try_expand_molecule[%s]: no second-level block found; "
-                "treating as non-hierarchical (has_second_level=%d, hierarchical_molecule=%d, found_second_level=%d)\n",
-                pattern_name.c_str(), has_second_level, hierarchical_molecule, found_second_level);
-        }
         return false;
-    } else {
-        VTR_LOG(
-            "try_expand_molecule[%s]: valid molecule; "
-            "(has_second_level=%d, hierarchical_molecule=%d, found_second_level=%d)\n",
-            pattern_name.c_str(), has_second_level, hierarchical_molecule, found_second_level);
     }
 
     if (molecule->is_chain()) {
@@ -2406,12 +2391,8 @@ static void print_chain_starting_points(t_pack_patterns* chain_pattern) {
     for (const auto& chain : chain_root_pins) {
         VTR_LOGV(chain_root_pins.size() > 1 && chain.size() > 1, "\n There are %zu starting points for chain id #%zu:\n", chain.size(), chainId++);
         VTR_LOGV(chain_root_pins.size() > 1 && chain.size() == 1, "\n There is 1 starting point for chain id #%zu:\n", chainId++);
-        for (const auto& pin_ptr : chain) {
-            VTR_LOG("\t%s\n", pin_ptr->to_string().c_str());
-        }
+        (void)chain; // Suppress unused variable warning
     }
-
-    VTR_LOG("\n");
 }
 
 /**
@@ -2985,11 +2966,10 @@ static void print_nets(std::unordered_set<AtomNetId>& nets,
                        int alm_placement_index,
                        int alut_placement_index,
                        const AtomNetlist& atom_nlist) {
-    VTR_LOG("Placement index: %d->%d (%d)\n", alm_placement_index, alut_placement_index, nets.size());
-    for (const auto net : nets) {
-        VTR_LOG("%d %s\n", net, atom_nlist.net_name(net).c_str());
-    }
-    VTR_LOG("\n");
+    (void)nets;
+    (void)alm_placement_index;
+    (void)alut_placement_index;
+    (void)atom_nlist;
 }
 
 static bool check_alm_input_limitation(t_pack_molecule* molecule, const AtomNetlist& atom_nlist) {
@@ -3019,14 +2999,12 @@ static bool check_alm_input_limitation(t_pack_molecule* molecule, const AtomNetl
     while (true) {
         auto connection = pattern_block->connections;
         // get the unique net ids feeding the adders
-        VTR_LOG("\n%s\n", atom_nlist.block_name(molecule->atom_block_ids[pattern_block->block_id]).c_str());
         while (connection) {
             if (connection->to_block == pattern_block && connection->to_pin->port->model_port != cin_port_model) {
                 auto& lut_id = molecule->atom_block_ids[connection->from_block->block_id];
                 if (lut_id) {
                     get_block_input_nets(lut_id, alm_nets, atom_nlist);
                     get_block_input_nets(lut_id, alut_nets, atom_nlist);
-                    VTR_LOG("LUT %s (%zu)\n", atom_nlist.block_name(lut_id).c_str(), atom_nlist.block_input_pins(lut_id).size());
                     if (atom_nlist.block_input_pins(lut_id).size() > 2)
                         return false;
                     if (atom_nlist.block_input_pins(lut_id).empty()) {
@@ -3225,38 +3203,6 @@ static bool check_lut_chain_molecules(t_pack_molecule* molecule, const AtomNetli
         auto block_connections = pattern_block->connections;
 
         // add all the blocks in the list of connections to the queue
-        while (block_connections) {
-            pattern_block_queue.push(block_connections->from_block);
-            pattern_block_queue.push(block_connections->to_block);
-            block_connections = block_connections->next;
-        }
-    }
-
-    VTR_LOG("check_lut_chain_molecules: Failed for pattern %s. Dump of primitives found:\n", pattern_name.c_str());
-
-    // Re-initialize for printing
-    std::fill(visited_blocks.begin(), visited_blocks.end(), false);
-    while (!pattern_block_queue.empty())
-        pattern_block_queue.pop();
-    pattern_block_queue.push(molecule->pack_pattern->root_block);
-
-    while (!pattern_block_queue.empty()) {
-        pattern_block = pattern_block_queue.front();
-        pattern_block_queue.pop();
-
-        if (!pattern_block || visited_blocks[pattern_block->block_id])
-            continue;
-
-        visited_blocks[pattern_block->block_id] = true;
-
-        if (molecule->atom_block_ids[pattern_block->block_id]) {
-            VTR_LOG("  Block ID: %zu, Name: %s, Type: %s\n",
-                    size_t(molecule->atom_block_ids[pattern_block->block_id]),
-                    atom_nlist.block_name(molecule->atom_block_ids[pattern_block->block_id]).c_str(),
-                    pattern_block->pb_type->name);
-        }
-
-        auto block_connections = pattern_block->connections;
         while (block_connections) {
             pattern_block_queue.push(block_connections->from_block);
             pattern_block_queue.push(block_connections->to_block);

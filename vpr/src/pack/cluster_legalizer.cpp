@@ -1131,35 +1131,6 @@ static bool check_lookahead_pins_used(t_pb* cur_pb, t_ext_pin_util max_external_
                                                prim_info.first->name, prim_info.second->to_string().c_str());
                 }
 
-                // VTR_LOG("(1) check_lookahead_pins_used: FAILED - lookahead input pins used %zu > class size %zu (Class %d, Port %s)%s (Init: %zu, Ceil: %zu, Max: %zu)\n",
-                //         cur_pb->pb_stats->lookahead_input_pins_used[i].size(), class_size, i, pin_name.c_str(), prim_msg.c_str(), initial_class_size, ceil_class_size, class_size);
-
-                // VTR_LOG(" -> Block Type: %s\n", cur_pb->pb_graph_node->pb_type->name);
-                // VTR_LOG(" -> Pins in Class %d:\n", i);
-                for (int port = 0; port < cur_pb->pb_graph_node->num_input_ports; ++port) {
-                    for (int pin = 0; pin < cur_pb->pb_graph_node->num_input_pins[port]; ++pin) {
-                        if (cur_pb->pb_graph_node->input_pins[port][pin].pin_class == i) {
-                            VTR_LOG("    %s\n", cur_pb->pb_graph_node->input_pins[port][pin].to_string().c_str());
-                        }
-                    }
-                }
-
-                // VTR_LOG(" -> Used Nets in Class %d:\n", i);
-                for (const auto& net_id : cur_pb->pb_stats->lookahead_input_pins_used[i]) {
-                    std::string user_info = get_net_user_info(net_id, true);
-                    VTR_LOG("    Net: %s -> Used by: %s\n", atom_ctx.nlist.net_name(net_id).c_str(), user_info.c_str());
-                }
-
-                // VTR_LOG(" -> All Input Class Status:\n");
-                for (int k = 0; k < cur_pb->pb_graph_node->num_input_pin_class; k++) {
-                    size_t k_size = cur_pb->pb_graph_node->input_pin_class_size[k];
-                    if (cur_pb->is_root()) {
-                        k_size = std::ceil(max_external_pin_util.input_pin_util * k_size);
-                        k_size = std::max<size_t>(k_size, cur_pb->pb_stats->input_pins_used[k].size());
-                    }
-                    VTR_LOG("    Class %d: Used %zu, Size %zu\n", k, cur_pb->pb_stats->lookahead_input_pins_used[k].size(), k_size);
-                }
-
                 return false;
             } else if (cur_pb->pb_stats->lookahead_input_pins_used[i].size() > 0) {
                 std::string pin_name = "unknown";
@@ -1218,42 +1189,6 @@ static bool check_lookahead_pins_used(t_pb* cur_pb, t_ext_pin_util max_external_
                             break;
                         }
                     }
-                }
-
-                auto prim_info = find_primitive_pin_for_class(i, false);
-                std::string prim_msg = "";
-                if (prim_info.first) {
-                    prim_msg = vtr::string_fmt(" (Primitive: %s, Pin: %s)",
-                                               prim_info.first->name, prim_info.second->to_string().c_str());
-                }
-
-                VTR_LOG("(2) check_lookahead_pins_used: FAILED - lookahead output pins used %zu > class size %zu (Class %d, Port %s)%s (Init: %zu, Ceil: %zu, Max: %zu)\n",
-                        cur_pb->pb_stats->lookahead_output_pins_used[i].size(), class_size, i, pin_name.c_str(), prim_msg.c_str(), initial_class_size, ceil_class_size, class_size);
-
-                VTR_LOG(" -> Block Type: %s\n", cur_pb->pb_graph_node->pb_type->name);
-                VTR_LOG(" -> Pins in Class %d:\n", i);
-                for (int port = 0; port < cur_pb->pb_graph_node->num_output_ports; ++port) {
-                    for (int pin = 0; pin < cur_pb->pb_graph_node->num_output_pins[port]; ++pin) {
-                        if (cur_pb->pb_graph_node->output_pins[port][pin].pin_class == i) {
-                            VTR_LOG("    %s\n", cur_pb->pb_graph_node->output_pins[port][pin].to_string().c_str());
-                        }
-                    }
-                }
-
-                VTR_LOG(" -> Used Nets in Class %d:\n", i);
-                for (const auto& net_id : cur_pb->pb_stats->lookahead_output_pins_used[i]) {
-                    std::string user_info = get_net_user_info(net_id, false);
-                    VTR_LOG("    Net: %s -> Driven by: %s\n", atom_ctx.nlist.net_name(net_id).c_str(), user_info.c_str());
-                }
-
-                VTR_LOG(" -> All Output Class Status:\n");
-                for (int k = 0; k < cur_pb->pb_graph_node->num_output_pin_class; k++) {
-                    size_t k_size = cur_pb->pb_graph_node->output_pin_class_size[k];
-                    if (cur_pb->is_root()) {
-                        k_size = std::ceil(max_external_pin_util.output_pin_util * k_size);
-                        k_size = std::max<size_t>(k_size, cur_pb->pb_stats->output_pins_used[k].size());
-                    }
-                    VTR_LOG("    Class %d: Used %zu, Size %zu\n", k, cur_pb->pb_stats->lookahead_output_pins_used[k].size(), k_size);
                 }
 
                 return false;
@@ -1648,10 +1583,7 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
             reset_lookahead_pins_used(cluster.pb);
             try_update_lookahead_pins_used(cluster.pb, atom_cluster_);
             if (!check_lookahead_pins_used(cluster.pb, max_external_pin_util)) {
-                VTR_LOGV(log_verbosity_ > 1, "\t\t\tFAILED Pin Feasibility Filter\n");
                 block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
-            } else {
-                VTR_LOGV(log_verbosity_ > 1, "\t\t\tPin Feasibility: Passed pin feasibility filter\n");
             }
         }
 

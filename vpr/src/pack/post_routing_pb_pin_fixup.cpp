@@ -355,22 +355,7 @@ static const t_pb_graph_pin* find_unused_pb_graph_pin_in_the_same_port(const t_p
         }
     }
 
-    /* Not found: Print debugging information */
-    for (int ipin = 0; ipin < pb_graph_pin->port->num_pins; ++ipin) {
-        const t_pb_graph_pin* candidate_pb_graph_pin = find_pb_graph_pin(pb_graph_pin->parent_node, std::string(pb_graph_pin->port->name), ipin);
-        int cand_pb_route_id = candidate_pb_graph_pin->pin_count_in_cluster;
-
-        VTR_LOG("\tCandidate pin: '%s'",
-                candidate_pb_graph_pin->to_string().c_str());
-
-        if (0 == pb_routes.count(cand_pb_route_id)) {
-            VTR_LOG("\tUnused\n");
-        } else {
-            VTR_LOG("\tmapped to net '%s'\n",
-                    g_vpr_ctx.atom().nlist.net_name(pb_routes.at(cand_pb_route_id).atom_net_id).c_str());
-        }
-    }
-
+    /* Not found */
     return nullptr;
 }
 

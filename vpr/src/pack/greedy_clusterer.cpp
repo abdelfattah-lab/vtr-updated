@@ -556,25 +556,20 @@ LegalizationClusterId GreedyClusterer::start_new_cluster(
     // TODO: Below may make more sense in its own method.
 
     // Successfully created cluster
-    VTR_LOG("\nIncrementing num_used_type_instances...\n");
     num_used_type_instances[block_type]++;
 
     /* Expand FPGA size if needed */
     // Check used type instances against the possible equivalent physical locations
     unsigned int num_instances = 0;
-    VTR_LOG("Checking equivalent tiles...\n");
     for (auto equivalent_tile : block_type->equivalent_tiles) {
         num_instances += mutable_device_ctx.grid.num_instances(equivalent_tile, -1);
     }
-    VTR_LOG("num_instances: %u, used: %zu\n", num_instances, num_used_type_instances[block_type]);
 
     if (num_used_type_instances[block_type] > num_instances) {
-        VTR_LOG("Resizing grid...\n");
         mutable_device_ctx.grid = create_device_grid(packer_opts_.device_layout,
                                                      arch_.grid_layouts,
                                                      num_used_type_instances,
                                                      packer_opts_.target_device_utilization);
-        VTR_LOG("Grid resized.\n");
     }
 
     return new_cluster_id;
