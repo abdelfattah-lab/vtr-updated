@@ -48,6 +48,7 @@ void add_the_blackbox_for_adds_yosys(Yosys::Design *design);
 void define_add_function_yosys(nnode_t *node, Yosys::Module *module, Yosys::Design *design);
 void split_adder(nnode_t *node, int a, int b, int sizea, int sizeb, int cin, int cout, int count, netlist_t *netlist);
 void iterate_adders(netlist_t *netlist);
+void pad_cascaded_adder_chains(netlist_t *netlist);
 void clean_adders();
 void reduce_operations(netlist_t *netlist, operation_list op);
 void traverse_list(operation_list oper, vtr::t_linked_vptr *place);

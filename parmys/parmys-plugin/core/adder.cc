@@ -24,6 +24,8 @@
 #include "odin_util.h"
 #include "subtractor.h"
 #include <string.h>
+#include <vector>
+#include <set>
 
 #include "vtr_memory.h"
 #include "vtr_util.h"
@@ -309,6 +311,28 @@ void define_add_function_yosys(nnode_t *node, Yosys::Module *module, Yosys::Desi
     /* Write the input pins*/
     for (int i = 0; i < node->num_input_pins; i++) {
         std::string p, q;
+
+        // Debug: print pin info before accessing
+        log("  [DEBUG] Node '%s' input_pin[%d/%d]: ", node->name, i, node->num_input_pins);
+        if (node->input_pins[i] == NULL) {
+            log("PIN IS NULL!\n");
+            oassert(false && "input_pins[i] is NULL");
+        }
+        npin_t* pin = node->input_pins[i];
+        if (pin->net == NULL) {
+            log("pin exists but NET IS NULL! (pin_node_idx=%d, type=%d)\n",
+                pin->pin_node_idx, pin->type);
+            oassert(false && "input_pins[i]->net is NULL");
+        }
+        nnet_t* net = pin->net;
+        log("net='%s', num_driver_pins=%d",
+            net->name ? net->name : "(null)", net->num_driver_pins);
+        if (net->num_driver_pins > 0 && net->driver_pins[0] != NULL) {
+            npin_t* drv = net->driver_pins[0];
+            log(", driver_node='%s'", drv->node ? drv->node->name : "(null)");
+        }
+        log("\n");
+
         oassert(node->input_pins[i]->net->num_driver_pins == 1);
         npin_t *driver_pin = node->input_pins[i]->net->driver_pins[0];
 
@@ -891,6 +915,725 @@ static void swap_adder_ports_for_chain_pattern(nnode_t *node)
 }
 
 /*-------------------------------------------------------------------------
+ * Structures and functions for padding cascaded adder chains.
+ *
+ * When two $add operations are chained (one's sumout feeds another's b input),
+ * they should form a ternary "chain" molecule. However, if the target chain
+ * has DFF-only adders at the start that don't connect to the source chain's
+ * sumout, VPR creates two independent "simple_chain" molecules instead.
+ *
+ * These functions detect such cascade-able pairs and add padding adders to
+ * the source chain so the pattern matches what VPR expects.
+ *-----------------------------------------------------------------------*/
+
+// Structure to track a pair of cascaded adder chains
+struct cascaded_adder_pair_t {
+    nnode_t* source_chain_head;      // First adder in source chain (dummy or first real)
+    nnode_t* target_chain_head;      // First adder in target chain (dummy or first real)
+    int first_connection_pos;        // Target position where sumout connection starts (1-indexed)
+    int num_dff_only;                // Number of DFF-only positions needing padding (= first_connection_pos - 1)
+};
+
+/*-------------------------------------------------------------------------
+ * (function: get_adder_cin_driver)
+ *
+ * Returns the driver node of an adder's cin pin, or NULL if not found.
+ *-----------------------------------------------------------------------*/
+static nnode_t* get_adder_cin_driver(nnode_t* adder)
+{
+    if (adder == NULL || adder->type != ADD)
+        return NULL;
+
+    // cin is the last input pin
+    int cin_idx = adder->num_input_pins - 1;
+    npin_t* cin_pin = adder->input_pins[cin_idx];
+
+    if (cin_pin == NULL || cin_pin->net == NULL)
+        return NULL;
+
+    nnet_t* net = cin_pin->net;
+    if (net->num_driver_pins == 0 || net->driver_pins == NULL || net->driver_pins[0] == NULL)
+        return NULL;
+
+    return net->driver_pins[0]->node;
+}
+
+/*-------------------------------------------------------------------------
+ * (function: get_adder_cout_fanout)
+ *
+ * Returns the first fanout node of an adder's cout pin that is an ADD,
+ * or NULL if not found.
+ *-----------------------------------------------------------------------*/
+static nnode_t* get_adder_cout_fanout(nnode_t* adder)
+{
+    if (adder == NULL || adder->type != ADD)
+        return NULL;
+
+    // cout is output pin 0
+    npin_t* cout_pin = adder->output_pins[0];
+    if (cout_pin == NULL || cout_pin->net == NULL)
+        return NULL;
+
+    nnet_t* net = cout_pin->net;
+    for (int i = 0; i < net->num_fanout_pins; i++) {
+        if (net->fanout_pins[i] != NULL && net->fanout_pins[i]->node != NULL) {
+            nnode_t* fanout = net->fanout_pins[i]->node;
+            if (fanout->type == ADD) {
+                return fanout;
+            }
+        }
+    }
+    return NULL;
+}
+
+/*-------------------------------------------------------------------------
+ * (function: find_chain_head)
+ *
+ * Given an adder node, walks back through cin->cout connections to find
+ * the chain head (the adder whose cin is not driven by another adder's cout).
+ *-----------------------------------------------------------------------*/
+static nnode_t* find_chain_head(nnode_t* adder)
+{
+    if (adder == NULL || adder->type != ADD)
+        return NULL;
+
+    nnode_t* current = adder;
+    while (true) {
+        nnode_t* driver = get_adder_cin_driver(current);
+        // If driver is not an ADD, or is the same node, we've found the head
+        if (driver == NULL || driver->type != ADD || driver == current) {
+            return current;
+        }
+        current = driver;
+    }
+}
+
+/*-------------------------------------------------------------------------
+ * (function: get_chain_adder_at_position)
+ *
+ * Given a chain head, returns the adder at the specified position (0-indexed).
+ * Position 0 is the head itself, position 1 is the next in the chain, etc.
+ *-----------------------------------------------------------------------*/
+static nnode_t* get_chain_adder_at_position(nnode_t* chain_head, int position)
+{
+    if (chain_head == NULL || position < 0)
+        return NULL;
+
+    nnode_t* current = chain_head;
+    for (int i = 0; i < position; i++) {
+        current = get_adder_cout_fanout(current);
+        if (current == NULL)
+            return NULL;
+    }
+    return current;
+}
+
+/*-------------------------------------------------------------------------
+ * (function: get_chain_length)
+ *
+ * Returns the length of an adder chain starting from the given head.
+ *-----------------------------------------------------------------------*/
+static int get_chain_length(nnode_t* chain_head)
+{
+    if (chain_head == NULL || chain_head->type != ADD)
+        return 0;
+
+    int length = 1;
+    nnode_t* current = chain_head;
+    while (true) {
+        nnode_t* next = get_adder_cout_fanout(current);
+        if (next == NULL)
+            break;
+        length++;
+        current = next;
+    }
+    return length;
+}
+
+/*-------------------------------------------------------------------------
+ * (function: is_adder_b_port_dff_only)
+ *
+ * Returns true if all pins in the adder's b port are NOT driven by
+ * any adder's sumout (i.e., they come from DFFs or other sources).
+ *-----------------------------------------------------------------------*/
+static bool is_adder_b_port_dff_only(nnode_t* adder)
+{
+    if (adder == NULL || adder->type != ADD)
+        return false;
+
+    int size_a = adder->input_port_sizes[0];
+    int size_b = adder->input_port_sizes[1];
+
+    // Check each pin in port B
+    for (int i = 0; i < size_b; i++) {
+        npin_t* pin = adder->input_pins[size_a + i];
+        if (is_pin_driven_by_adder_sumout(pin)) {
+            return false;  // At least one pin is driven by sumout
+        }
+    }
+    return true;  // No pins driven by sumout
+}
+
+/*-------------------------------------------------------------------------
+ * (function: get_b_port_sumout_driver_chain_head)
+ *
+ * If any pin in the adder's b port is driven by an adder's sumout,
+ * returns the chain head of that source adder. Otherwise returns NULL.
+ *-----------------------------------------------------------------------*/
+static nnode_t* get_b_port_sumout_driver_chain_head(nnode_t* adder)
+{
+    if (adder == NULL || adder->type != ADD)
+        return NULL;
+
+    int size_a = adder->input_port_sizes[0];
+    int size_b = adder->input_port_sizes[1];
+
+    // Check each pin in port B for sumout connection
+    for (int i = 0; i < size_b; i++) {
+        npin_t* pin = adder->input_pins[size_a + i];
+        if (pin != NULL && pin->net != NULL && pin->net->num_driver_pins > 0) {
+            npin_t* driver_pin = pin->net->driver_pins[0];
+            if (driver_pin != NULL && driver_pin->node != NULL) {
+                nnode_t* driver = driver_pin->node;
+                if (driver->type == ADD) {
+                    // Check if driver pin is from sumout (not cout)
+                    int cout_size = driver->output_port_sizes[0];
+                    if (driver_pin->pin_node_idx >= cout_size) {
+                        // This is a sumout pin, find the chain head
+                        return find_chain_head(driver);
+                    }
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+/*-------------------------------------------------------------------------
+ * (function: detect_cascaded_adder_pairs)
+ *
+ * Detects pairs of adder chains where one chain's sumout feeds another's
+ * b port, but there are DFF-only adders at the start of the target chain.
+ *-----------------------------------------------------------------------*/
+static std::vector<cascaded_adder_pair_t> detect_cascaded_adder_pairs(netlist_t* netlist)
+{
+    std::vector<cascaded_adder_pair_t> pairs;
+    std::set<nnode_t*> processed_targets;
+
+    // Iterate through all processed adders
+    t_linked_vptr* current = processed_adder_list;
+    while (current != NULL) {
+        nnode_t* adder = (nnode_t*)current->data_vptr;
+        current = current->next;
+
+        if (adder == NULL || adder->type != ADD)
+            continue;
+
+        // Find chain head for this adder
+        nnode_t* target_head = find_chain_head(adder);
+        if (target_head == NULL || processed_targets.count(target_head) > 0)
+            continue;
+
+        // Check if this target chain has any adder with b port fed by sumout
+        nnode_t* source_head = NULL;
+        int first_connection_pos = -1;
+
+        int target_length = get_chain_length(target_head);
+        for (int pos = 1; pos < target_length; pos++) {  // Skip position 0 (dummy)
+            nnode_t* target_adder = get_chain_adder_at_position(target_head, pos);
+            if (target_adder == NULL)
+                break;
+
+            nnode_t* driver_head = get_b_port_sumout_driver_chain_head(target_adder);
+            if (driver_head != NULL && driver_head != target_head) {
+                source_head = driver_head;
+                first_connection_pos = pos;
+                break;
+            }
+        }
+
+        // If we found a connection and there are DFF-only positions before it
+        if (source_head != NULL && first_connection_pos > 1) {
+            // Verify positions 1 to (first_connection_pos - 1) are DFF-only
+            bool all_dff_only = true;
+            for (int pos = 1; pos < first_connection_pos; pos++) {
+                nnode_t* target_adder = get_chain_adder_at_position(target_head, pos);
+                if (target_adder == NULL || !is_adder_b_port_dff_only(target_adder)) {
+                    all_dff_only = false;
+                    break;
+                }
+            }
+
+            if (all_dff_only) {
+                cascaded_adder_pair_t pair;
+                pair.source_chain_head = source_head;
+                pair.target_chain_head = target_head;
+                pair.first_connection_pos = first_connection_pos;
+                pair.num_dff_only = first_connection_pos - 1;
+                pairs.push_back(pair);
+                processed_targets.insert(target_head);
+            }
+        }
+    }
+
+    return pairs;
+}
+
+/*-------------------------------------------------------------------------
+ * (function: create_padding_adder)
+ *
+ * Creates a padding adder that passes through one input unchanged.
+ * The padding adder computes: a + 0 + cin = a (passthrough).
+ *-----------------------------------------------------------------------*/
+static nnode_t* create_padding_adder(
+    nnode_t* target_adder,
+    int position,
+    nnode_t* prev_adder,
+    netlist_t* netlist)
+{
+    if (target_adder == NULL || netlist == NULL)
+        return NULL;
+
+    // Allocate new node
+    nnode_t* padding = allocate_nnode(target_adder->loc);
+
+    // Set name
+    padding->name = (char*)vtr::malloc(strlen(target_adder->name) + 30);
+    odin_sprintf(padding->name, "%s_padding_%d", target_adder->name, position);
+
+    padding->type = ADD;
+
+    // Get port sizes from target adder
+    int size_a = target_adder->input_port_sizes[0];
+    int size_b = target_adder->input_port_sizes[1];
+
+    log("[DEBUG] create_padding_adder: target='%s', size_a=%d, size_b=%d\n",
+        target_adder->name, size_a, size_b);
+
+    // For padding adder, we use size_b for port A (since we're taking target's b input)
+    // and 1 for port B (will be connected to gnd)
+    int padding_size = size_b;
+
+    if (padding_size <= 0) {
+        log("[DEBUG] ERROR: padding_size=%d is invalid!\n", padding_size);
+        return NULL;
+    }
+
+    // Set bit_width to ensure this padding adder is treated as a hard adder
+    // in partial_map_node() and not decomposed into soft logic (which would
+    // leave input_pins NULL and cause crashes in define_add_function_yosys).
+    // Use max of padding_size and min_threshold_adder to guarantee it passes
+    // the threshold check in partial_map_node().
+    padding->bit_width = (padding_size >= min_threshold_adder) ? padding_size : min_threshold_adder;
+
+    // Allocate input ports: A (size_b pins) + B (size_b pins) + cin (1 pin)
+    padding->num_input_port_sizes = 3;
+    padding->input_port_sizes = (int*)vtr::malloc(sizeof(int) * 3);
+    padding->input_port_sizes[0] = padding_size;  // port A
+    padding->input_port_sizes[1] = padding_size;  // port B
+    padding->input_port_sizes[2] = 1;             // cin
+
+    padding->num_input_pins = padding_size + padding_size + 1;
+    padding->input_pins = (npin_t**)vtr::calloc(padding->num_input_pins, sizeof(npin_t*));
+
+    // Allocate output ports: cout (1 pin) + sumout (size_b pins)
+    padding->num_output_port_sizes = 2;
+    padding->output_port_sizes = (int*)vtr::malloc(sizeof(int) * 2);
+    padding->output_port_sizes[0] = 1;            // cout
+    padding->output_port_sizes[1] = padding_size; // sumout
+
+    padding->num_output_pins = 1 + padding_size;
+    padding->output_pins = (npin_t**)vtr::calloc(padding->num_output_pins, sizeof(npin_t*));
+
+    // Connect port A to GND initially (will be reconnected in rewire_target_to_padding)
+    // This ensures no input pins are left NULL even if rewiring fails
+    log("[DEBUG] Connecting port A (indices 0 to %d) to GND\n", padding_size - 1);
+    for (int i = 0; i < padding_size; i++) {
+        connect_nodes(netlist->gnd_node, 0, padding, i);
+        log("[DEBUG]   After connect_nodes for A[%d]: input_pins[%d]=%p\n",
+            i, i, (void*)padding->input_pins[i]);
+    }
+
+    // Connect port B to GND (all pins)
+    log("[DEBUG] Connecting port B (indices %d to %d) to GND\n", padding_size, 2*padding_size - 1);
+    for (int i = 0; i < padding_size; i++) {
+        connect_nodes(netlist->gnd_node, 0, padding, padding_size + i);
+    }
+
+    // Connect cin from previous adder's cout (or gnd if first)
+    log("[DEBUG] Connecting cin (index %d)\n", padding->num_input_pins - 1);
+    if (prev_adder != NULL && prev_adder->type == ADD) {
+        connect_nodes(prev_adder, 0, padding, padding->num_input_pins - 1);
+    } else {
+        connect_nodes(netlist->gnd_node, 0, padding, padding->num_input_pins - 1);
+    }
+
+    // Verify all input pins are set
+    log("[DEBUG] After all connections, verifying input pins:\n");
+    for (int i = 0; i < padding->num_input_pins; i++) {
+        log("[DEBUG]   input_pins[%d] = %p\n", i, (void*)padding->input_pins[i]);
+    }
+
+    // Allocate cout pin (output index 0) - MUST always exist for BLIF output
+    // Even if nothing connects to this cout, define_add_function_yosys requires
+    // all output pins to be valid with names.
+    npin_t* cout_pin = allocate_npin();
+    cout_pin->name = append_string("", "%s~cout~0", padding->name);
+    cout_pin->type = OUTPUT;
+    cout_pin->node = padding;
+    cout_pin->pin_node_idx = 0;
+    padding->output_pins[0] = cout_pin;
+
+    // Create a net for cout (required even if unused)
+    nnet_t* cout_net = allocate_nnet();
+    cout_net->name = append_string("", "%s~cout", padding->name);
+    add_driver_pin_to_net(cout_net, cout_pin);
+
+    // Allocate sumout pins with nets (rewire step will add fanouts to these nets)
+    for (int i = 0; i < padding_size; i++) {
+        npin_t* sumout_pin = allocate_npin();
+        sumout_pin->name = append_string("", "%s~sumout~%d", padding->name, i);
+        sumout_pin->type = OUTPUT;
+        sumout_pin->node = padding;
+        sumout_pin->pin_node_idx = 1 + i;
+        padding->output_pins[1 + i] = sumout_pin;
+
+        // Create a net for this sumout - required for proper BLIF output
+        nnet_t* sumout_net = allocate_nnet();
+        sumout_net->name = vtr::strdup(sumout_pin->name);
+        add_driver_pin_to_net(sumout_net, sumout_pin);
+    }
+
+    return padding;
+}
+
+/*-------------------------------------------------------------------------
+ * (function: rewire_target_to_padding)
+ *
+ * Rewires the target adder's b port to receive from the padding adder's
+ * sumout. The original driver of target's b port is moved to padding's a port.
+ *
+ * Note: create_padding_adder pre-connects port A to GND and creates nets
+ * for sumout pins. This function rewires those connections.
+ *-----------------------------------------------------------------------*/
+static void rewire_target_to_padding(
+    nnode_t* padding,
+    nnode_t* target,
+    netlist_t* netlist)
+{
+    if (padding == NULL || target == NULL || netlist == NULL)
+        return;
+
+    int size_a = target->input_port_sizes[0];
+    int size_b = target->input_port_sizes[1];
+    int padding_size = padding->input_port_sizes[0];
+
+    // For each pin in target's b port
+    for (int i = 0; i < size_b && i < padding_size; i++) {
+        int target_b_idx = size_a + i;
+        npin_t* target_pin = target->input_pins[target_b_idx];
+
+        if (target_pin == NULL) {
+            // If target has no b pin at this index, padding's a stays connected to GND
+            // (already done in create_padding_adder), nothing more to do
+            continue;
+        }
+
+        nnet_t* original_net = target_pin->net;
+
+        // Get padding's current port A pin (connected to GND from create_padding_adder)
+        npin_t* old_padding_a_pin = padding->input_pins[i];
+
+        // Move the original driver to padding's a port
+        if (original_net != NULL && original_net->num_driver_pins > 0) {
+            // Remove old padding A pin from GND net's fanout
+            if (old_padding_a_pin != NULL && old_padding_a_pin->net != NULL) {
+                nnet_t* gnd_net = old_padding_a_pin->net;
+                for (int j = 0; j < gnd_net->num_fanout_pins; j++) {
+                    if (gnd_net->fanout_pins[j] == old_padding_a_pin) {
+                        for (int k = j; k < gnd_net->num_fanout_pins - 1; k++) {
+                            gnd_net->fanout_pins[k] = gnd_net->fanout_pins[k + 1];
+                        }
+                        gnd_net->num_fanout_pins--;
+                        break;
+                    }
+                }
+            }
+
+            // Create new pin for padding's a input
+            npin_t* padding_a_pin = allocate_npin();
+            padding_a_pin->type = INPUT;
+            padding_a_pin->node = padding;
+            padding_a_pin->pin_node_idx = i;
+            padding->input_pins[i] = padding_a_pin;
+
+            // Connect padding's a pin to the original net
+            add_fanout_pin_to_net(original_net, padding_a_pin);
+
+            // Remove target's b pin from the original net's fanout
+            for (int j = 0; j < original_net->num_fanout_pins; j++) {
+                if (original_net->fanout_pins[j] == target_pin) {
+                    for (int k = j; k < original_net->num_fanout_pins - 1; k++) {
+                        original_net->fanout_pins[k] = original_net->fanout_pins[k + 1];
+                    }
+                    original_net->num_fanout_pins--;
+                    break;
+                }
+            }
+        }
+        // else: padding's a stays connected to GND (already done)
+
+        // Get the sumout net (created in create_padding_adder)
+        npin_t* sumout_pin = padding->output_pins[1 + i];
+        nnet_t* sumout_net = sumout_pin->net;
+
+        if (sumout_net == NULL) {
+            // Shouldn't happen, but create one just in case
+            sumout_net = allocate_nnet();
+            sumout_net->name = append_string("", "%s~sumout~%d", padding->name, i);
+            add_driver_pin_to_net(sumout_net, sumout_pin);
+        }
+
+        // Remove target's b pin from its old net (if different from sumout_net)
+        if (target_pin->net != NULL && target_pin->net != sumout_net) {
+            nnet_t* old_net = target_pin->net;
+            for (int j = 0; j < old_net->num_fanout_pins; j++) {
+                if (old_net->fanout_pins[j] == target_pin) {
+                    for (int k = j; k < old_net->num_fanout_pins - 1; k++) {
+                        old_net->fanout_pins[k] = old_net->fanout_pins[k + 1];
+                    }
+                    old_net->num_fanout_pins--;
+                    break;
+                }
+            }
+        }
+
+        // Connect target's b pin to padding's sumout net
+        target_pin->net = sumout_net;
+        add_fanout_pin_to_net(sumout_net, target_pin);
+    }
+}
+
+/*-------------------------------------------------------------------------
+ * (function: transform_dummies_for_chain)
+ *
+ * Transforms the dummy adders for proper chain pattern:
+ * - Source dummy: a=gnd (outputs 0 instead of 1)
+ * - Target dummy: b=source_dummy.sumout (receives 0, same as original gnd)
+ *-----------------------------------------------------------------------*/
+static void transform_dummies_for_chain(
+    nnode_t* source_dummy,
+    nnode_t* target_dummy,
+    netlist_t* netlist)
+{
+    if (source_dummy == NULL || target_dummy == NULL || netlist == NULL)
+        return;
+
+    // Source dummy: change a[0] from vcc to gnd so sumout = 0
+    // First, disconnect the current a[0] input
+    npin_t* source_a_pin = source_dummy->input_pins[0];
+    if (source_a_pin != NULL && source_a_pin->net != NULL) {
+        nnet_t* old_net = source_a_pin->net;
+        // Remove from fanout list
+        for (int i = 0; i < old_net->num_fanout_pins; i++) {
+            if (old_net->fanout_pins[i] == source_a_pin) {
+                for (int j = i; j < old_net->num_fanout_pins - 1; j++) {
+                    old_net->fanout_pins[j] = old_net->fanout_pins[j + 1];
+                }
+                old_net->num_fanout_pins--;
+                break;
+            }
+        }
+        source_a_pin->net = NULL;
+    }
+    // Connect to gnd
+    connect_nodes(netlist->gnd_node, 0, source_dummy, 0);
+
+    // Target dummy: change b[0] to receive from source_dummy's sumout
+    int target_size_a = target_dummy->input_port_sizes[0];
+    npin_t* target_b_pin = target_dummy->input_pins[target_size_a];  // b[0]
+
+    if (target_b_pin != NULL && target_b_pin->net != NULL) {
+        nnet_t* old_net = target_b_pin->net;
+        // Remove from fanout list
+        for (int i = 0; i < old_net->num_fanout_pins; i++) {
+            if (old_net->fanout_pins[i] == target_b_pin) {
+                for (int j = i; j < old_net->num_fanout_pins - 1; j++) {
+                    old_net->fanout_pins[j] = old_net->fanout_pins[j + 1];
+                }
+                old_net->num_fanout_pins--;
+                break;
+            }
+        }
+        target_b_pin->net = NULL;
+    }
+
+    // Create net from source_dummy sumout[0] to target_dummy b[0]
+    npin_t* source_sumout_pin = source_dummy->output_pins[1];  // sumout is at index 1
+    if (source_sumout_pin == NULL) {
+        // Allocate if not present
+        source_sumout_pin = allocate_npin();
+        source_sumout_pin->name = append_string("", "%s~sumout~0", source_dummy->name);
+        source_sumout_pin->type = OUTPUT;
+        source_sumout_pin->node = source_dummy;
+        source_sumout_pin->pin_node_idx = 1;
+        source_dummy->output_pins[1] = source_sumout_pin;
+    }
+
+    nnet_t* chain_net = allocate_nnet();
+    chain_net->name = append_string("", "%s~dummy_chain~%s", source_dummy->name, target_dummy->name);
+
+    // Connect source sumout to net as driver
+    if (source_sumout_pin->net == NULL) {
+        add_driver_pin_to_net(chain_net, source_sumout_pin);
+    } else {
+        // Use existing net
+        chain_net = source_sumout_pin->net;
+    }
+
+    // Connect target b[0] to net as fanout
+    if (target_b_pin == NULL) {
+        target_b_pin = allocate_npin();
+        target_b_pin->type = INPUT;
+        target_b_pin->node = target_dummy;
+        target_b_pin->pin_node_idx = target_size_a;
+        target_dummy->input_pins[target_size_a] = target_b_pin;
+    }
+    target_b_pin->net = chain_net;
+    add_fanout_pin_to_net(chain_net, target_b_pin);
+}
+
+/*-------------------------------------------------------------------------
+ * (function: rewire_source_cin_to_padding)
+ *
+ * Rewires the source chain adder's cin to receive from the padding adder's
+ * cout instead of from its original driver (previous source adder or dummy).
+ * This ensures the source chain flows through the padding adder.
+ *-----------------------------------------------------------------------*/
+static void rewire_source_cin_to_padding(
+    nnode_t* source_adder,
+    nnode_t* padding,
+    netlist_t* netlist)
+{
+    if (source_adder == NULL || padding == NULL || netlist == NULL)
+        return;
+
+    // cin is the last input pin
+    int cin_idx = source_adder->num_input_pins - 1;
+    npin_t* cin_pin = source_adder->input_pins[cin_idx];
+
+    if (cin_pin == NULL) {
+        log("[DEBUG] rewire_source_cin_to_padding: cin_pin is NULL for %s\n", source_adder->name);
+        return;
+    }
+
+    // Disconnect cin from its current net
+    nnet_t* old_net = cin_pin->net;
+    if (old_net != NULL) {
+        // Remove from fanout list
+        for (int i = 0; i < old_net->num_fanout_pins; i++) {
+            if (old_net->fanout_pins[i] == cin_pin) {
+                for (int j = i; j < old_net->num_fanout_pins - 1; j++) {
+                    old_net->fanout_pins[j] = old_net->fanout_pins[j + 1];
+                }
+                old_net->num_fanout_pins--;
+                break;
+            }
+        }
+        cin_pin->net = NULL;
+    }
+
+    // Get padding's cout net (cout is output pin 0)
+    npin_t* padding_cout_pin = padding->output_pins[0];
+    if (padding_cout_pin == NULL || padding_cout_pin->net == NULL) {
+        log("[DEBUG] rewire_source_cin_to_padding: padding cout pin or net is NULL\n");
+        return;
+    }
+
+    nnet_t* cout_net = padding_cout_pin->net;
+
+    // Connect source's cin to padding's cout net
+    cin_pin->net = cout_net;
+    add_fanout_pin_to_net(cout_net, cin_pin);
+
+    log("[DEBUG] rewire_source_cin_to_padding: rewired %s cin to %s cout\n",
+        source_adder->name, padding->name);
+}
+
+/*-------------------------------------------------------------------------
+ * (function: pad_cascaded_adder_chains)
+ *
+ * Main entry point for padding cascaded adder chains.
+ * Detects cascade-able pairs and adds padding adders to create proper
+ * ternary chain patterns that VPR can recognize.
+ *-----------------------------------------------------------------------*/
+void pad_cascaded_adder_chains(netlist_t* netlist)
+{
+    if (netlist == NULL || hard_adders == NULL)
+        return;
+
+    // Detect cascaded pairs that need padding
+    std::vector<cascaded_adder_pair_t> pairs = detect_cascaded_adder_pairs(netlist);
+
+    if (pairs.empty())
+        return;
+
+    log("Padding %zu cascaded adder chain pair(s) for ternary pattern\n", pairs.size());
+
+    for (auto& pair : pairs) {
+        if (pair.num_dff_only == 0)
+            continue;
+
+        log("  Padding pair: source=%s, target=%s, dff_only_positions=%d\n",
+            pair.source_chain_head->name,
+            pair.target_chain_head->name,
+            pair.num_dff_only);
+
+        // Transform dummy adders
+        transform_dummies_for_chain(
+            pair.source_chain_head,
+            pair.target_chain_head,
+            netlist);
+
+        // Create padding adders for each DFF-only position
+        nnode_t* prev_padding = pair.source_chain_head;  // Start from source dummy
+
+        for (int pos = 1; pos <= pair.num_dff_only; pos++) {
+            nnode_t* target_adder = get_chain_adder_at_position(pair.target_chain_head, pos);
+            if (target_adder == NULL) {
+                log("    Warning: Could not find target adder at position %d\n", pos);
+                continue;
+            }
+
+            // Create padding adder
+            nnode_t* padding = create_padding_adder(target_adder, pos, prev_padding, netlist);
+            if (padding == NULL) {
+                log("    Warning: Failed to create padding adder at position %d\n", pos);
+                continue;
+            }
+
+            // Rewire target's b port to receive from padding's sumout
+            rewire_target_to_padding(padding, target_adder, netlist);
+
+            // Rewire source chain's adder at this position to take cin from padding's cout
+            // This ensures the source chain flows: dummy -> padding -> source[pos] -> ...
+            nnode_t* source_adder = get_chain_adder_at_position(pair.source_chain_head, pos);
+            if (source_adder != NULL) {
+                rewire_source_cin_to_padding(source_adder, padding, netlist);
+            } else {
+                log("    Warning: Could not find source adder at position %d for cin rewiring\n", pos);
+            }
+
+            // Add padding to processed list
+            processed_adder_list = insert_in_vptr_list(processed_adder_list, padding);
+
+            prev_padding = padding;
+            log("    Created padding adder: %s\n", padding->name);
+        }
+    }
+}
+
+/*-------------------------------------------------------------------------
  * (function: iterate_adders)
  *
  * This function will iterate over all of the add operations that
@@ -957,6 +1700,10 @@ void iterate_adders(netlist_t *netlist)
         else
             processed_adder_list = insert_in_vptr_list(processed_adder_list, node);
     }
+
+    // After all adders are split, pad cascaded chains for ternary pattern recognition
+    pad_cascaded_adder_chains(netlist);
+
     return;
 }
 

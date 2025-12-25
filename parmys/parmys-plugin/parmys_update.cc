@@ -234,7 +234,8 @@ void depth_traverse_update_design(nnode_t *node, uintptr_t traverse_mark_number,
         node->traverse_visited = traverse_mark_number;
 
         for (int i = 0; i < node->num_output_pins; i++) {
-            if (node->output_pins[i]->net == NULL)
+            // Check if output pin exists before accessing its net
+            if (node->output_pins[i] == NULL || node->output_pins[i]->net == NULL)
                 continue;
 
             next_net = node->output_pins[i]->net;
