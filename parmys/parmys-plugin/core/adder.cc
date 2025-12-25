@@ -312,27 +312,8 @@ void define_add_function_yosys(nnode_t *node, Yosys::Module *module, Yosys::Desi
     for (int i = 0; i < node->num_input_pins; i++) {
         std::string p, q;
 
-        // Debug: print pin info before accessing
-        log("  [DEBUG] Node '%s' input_pin[%d/%d]: ", node->name, i, node->num_input_pins);
-        if (node->input_pins[i] == NULL) {
-            log("PIN IS NULL!\n");
-            oassert(false && "input_pins[i] is NULL");
-        }
-        npin_t* pin = node->input_pins[i];
-        if (pin->net == NULL) {
-            log("pin exists but NET IS NULL! (pin_node_idx=%d, type=%d)\n",
-                pin->pin_node_idx, pin->type);
-            oassert(false && "input_pins[i]->net is NULL");
-        }
-        nnet_t* net = pin->net;
-        log("net='%s', num_driver_pins=%d",
-            net->name ? net->name : "(null)", net->num_driver_pins);
-        if (net->num_driver_pins > 0 && net->driver_pins[0] != NULL) {
-            npin_t* drv = net->driver_pins[0];
-            log(", driver_node='%s'", drv->node ? drv->node->name : "(null)");
-        }
-        log("\n");
-
+        oassert(node->input_pins[i] != NULL && "input_pins[i] is NULL");
+        oassert(node->input_pins[i]->net != NULL && "input_pins[i]->net is NULL");
         oassert(node->input_pins[i]->net->num_driver_pins == 1);
         npin_t *driver_pin = node->input_pins[i]->net->driver_pins[0];
 
@@ -1207,15 +1188,11 @@ static nnode_t* create_padding_adder(
     int size_a = target_adder->input_port_sizes[0];
     int size_b = target_adder->input_port_sizes[1];
 
-    log("[DEBUG] create_padding_adder: target='%s', size_a=%d, size_b=%d\n",
-        target_adder->name, size_a, size_b);
-
     // For padding adder, we use size_b for port A (since we're taking target's b input)
     // and 1 for port B (will be connected to gnd)
     int padding_size = size_b;
 
     if (padding_size <= 0) {
-        log("[DEBUG] ERROR: padding_size=%d is invalid!\n", padding_size);
         return NULL;
     }
 
@@ -1247,31 +1224,20 @@ static nnode_t* create_padding_adder(
 
     // Connect port A to GND initially (will be reconnected in rewire_target_to_padding)
     // This ensures no input pins are left NULL even if rewiring fails
-    log("[DEBUG] Connecting port A (indices 0 to %d) to GND\n", padding_size - 1);
     for (int i = 0; i < padding_size; i++) {
         connect_nodes(netlist->gnd_node, 0, padding, i);
-        log("[DEBUG]   After connect_nodes for A[%d]: input_pins[%d]=%p\n",
-            i, i, (void*)padding->input_pins[i]);
     }
 
     // Connect port B to GND (all pins)
-    log("[DEBUG] Connecting port B (indices %d to %d) to GND\n", padding_size, 2*padding_size - 1);
     for (int i = 0; i < padding_size; i++) {
         connect_nodes(netlist->gnd_node, 0, padding, padding_size + i);
     }
 
     // Connect cin from previous adder's cout (or gnd if first)
-    log("[DEBUG] Connecting cin (index %d)\n", padding->num_input_pins - 1);
     if (prev_adder != NULL && prev_adder->type == ADD) {
         connect_nodes(prev_adder, 0, padding, padding->num_input_pins - 1);
     } else {
         connect_nodes(netlist->gnd_node, 0, padding, padding->num_input_pins - 1);
-    }
-
-    // Verify all input pins are set
-    log("[DEBUG] After all connections, verifying input pins:\n");
-    for (int i = 0; i < padding->num_input_pins; i++) {
-        log("[DEBUG]   input_pins[%d] = %p\n", i, (void*)padding->input_pins[i]);
     }
 
     // Allocate cout pin (output index 0) - MUST always exist for BLIF output
@@ -1523,7 +1489,6 @@ static void rewire_source_cin_to_padding(
     npin_t* cin_pin = source_adder->input_pins[cin_idx];
 
     if (cin_pin == NULL) {
-        log("[DEBUG] rewire_source_cin_to_padding: cin_pin is NULL for %s\n", source_adder->name);
         return;
     }
 
@@ -1546,7 +1511,6 @@ static void rewire_source_cin_to_padding(
     // Get padding's cout net (cout is output pin 0)
     npin_t* padding_cout_pin = padding->output_pins[0];
     if (padding_cout_pin == NULL || padding_cout_pin->net == NULL) {
-        log("[DEBUG] rewire_source_cin_to_padding: padding cout pin or net is NULL\n");
         return;
     }
 
@@ -1555,9 +1519,6 @@ static void rewire_source_cin_to_padding(
     // Connect source's cin to padding's cout net
     cin_pin->net = cout_net;
     add_fanout_pin_to_net(cout_net, cin_pin);
-
-    log("[DEBUG] rewire_source_cin_to_padding: rewired %s cin to %s cout\n",
-        source_adder->name, padding->name);
 }
 
 /*-------------------------------------------------------------------------
