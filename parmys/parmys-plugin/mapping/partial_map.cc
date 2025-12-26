@@ -61,7 +61,9 @@ static void instantiate_variable_shift(nnode_t *node, operation_list type, short
 /*-------------------------------------------------------------------------
  * (function: partial_map_top)
  *-----------------------------------------------------------------------*/
-void partial_map_top(netlist_t *netlist) { depth_first_traversal_to_partial_map(PARTIAL_MAP_TRAVERSE_VALUE, netlist); }
+void partial_map_top(netlist_t *netlist) {
+    depth_first_traversal_to_partial_map(PARTIAL_MAP_TRAVERSE_VALUE, netlist);
+}
 
 /*---------------------------------------------------------------------------------------------
  * (function: depth_first_traversal_to_parital_map()
@@ -84,28 +86,17 @@ void depth_first_traversal_to_partial_map(short marker_value, netlist_t *netlist
  *-------------------------------------------------------------------------------------------*/
 void depth_first_traverse_partial_map(nnode_t *node, uintptr_t traverse_mark_number, netlist_t *netlist)
 {
-    if (node == NULL) {
-        log("DEBUG: depth_first_traverse_partial_map called with NULL node!\n");
+    if (node == NULL)
         return;
-    }
 
     if (node->traverse_visited != traverse_mark_number) {
-
         node->traverse_visited = traverse_mark_number;
 
-        log("DEBUG: Traversing node: %s (type=%d, num_output_pins=%ld)\n",
-            node->name ? node->name : "NULL_NAME", node->type, node->num_output_pins);
-
         for (int i = 0; i < node->num_output_pins; i++) {
-            log("DEBUG:   output_pin[%d]: %p\n", i, (void*)node->output_pins[i]);
-            if (node->output_pins[i] == NULL) {
-                log("DEBUG:   output_pin[%d] is NULL, skipping\n", i);
+            if (node->output_pins[i] == NULL)
                 continue;
-            }
             if (node->output_pins[i]->net) {
                 nnet_t *next_net = node->output_pins[i]->net;
-                log("DEBUG:   output_pin[%d]->net: %p (num_fanout_pins=%d)\n",
-                    i, (void*)next_net, next_net->num_fanout_pins);
                 if (next_net->fanout_pins) {
                     for (int j = 0; j < next_net->num_fanout_pins; j++) {
                         if (next_net->fanout_pins[j]) {
@@ -118,7 +109,6 @@ void depth_first_traverse_partial_map(nnode_t *node, uintptr_t traverse_mark_num
             }
         }
 
-        log("DEBUG: Calling partial_map_node for: %s\n", node->name ? node->name : "NULL_NAME");
         partial_map_node(node, traverse_mark_number, netlist);
     }
 }

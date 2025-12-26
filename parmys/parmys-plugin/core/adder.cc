@@ -1301,7 +1301,6 @@ static void rewire_target_to_padding(
 
         if (target_pin == NULL) {
             // If target has no b pin at this index, padding's a stays connected to GND
-            // (already done in create_padding_adder), nothing more to do
             continue;
         }
 
@@ -1319,6 +1318,10 @@ static void rewire_target_to_padding(
                     if (gnd_net->fanout_pins[j] == old_padding_a_pin) {
                         for (int k = j; k < gnd_net->num_fanout_pins - 1; k++) {
                             gnd_net->fanout_pins[k] = gnd_net->fanout_pins[k + 1];
+                            // Update pin_net_idx for shifted pins
+                            if (gnd_net->fanout_pins[k] != NULL) {
+                                gnd_net->fanout_pins[k]->pin_net_idx = k;
+                            }
                         }
                         gnd_net->num_fanout_pins--;
                         break;
@@ -1341,13 +1344,16 @@ static void rewire_target_to_padding(
                 if (original_net->fanout_pins[j] == target_pin) {
                     for (int k = j; k < original_net->num_fanout_pins - 1; k++) {
                         original_net->fanout_pins[k] = original_net->fanout_pins[k + 1];
+                        // Update pin_net_idx for shifted pins
+                        if (original_net->fanout_pins[k] != NULL) {
+                            original_net->fanout_pins[k]->pin_net_idx = k;
+                        }
                     }
                     original_net->num_fanout_pins--;
                     break;
                 }
             }
         }
-        // else: padding's a stays connected to GND (already done)
 
         // Get the sumout net (created in create_padding_adder)
         npin_t* sumout_pin = padding->output_pins[1 + i];
@@ -1367,6 +1373,10 @@ static void rewire_target_to_padding(
                 if (old_net->fanout_pins[j] == target_pin) {
                     for (int k = j; k < old_net->num_fanout_pins - 1; k++) {
                         old_net->fanout_pins[k] = old_net->fanout_pins[k + 1];
+                        // Update pin_net_idx for shifted pins
+                        if (old_net->fanout_pins[k] != NULL) {
+                            old_net->fanout_pins[k]->pin_net_idx = k;
+                        }
                     }
                     old_net->num_fanout_pins--;
                     break;
@@ -1405,6 +1415,10 @@ static void transform_dummies_for_chain(
             if (old_net->fanout_pins[i] == source_a_pin) {
                 for (int j = i; j < old_net->num_fanout_pins - 1; j++) {
                     old_net->fanout_pins[j] = old_net->fanout_pins[j + 1];
+                    // Update pin_net_idx for shifted pins
+                    if (old_net->fanout_pins[j] != NULL) {
+                        old_net->fanout_pins[j]->pin_net_idx = j;
+                    }
                 }
                 old_net->num_fanout_pins--;
                 break;
@@ -1426,6 +1440,10 @@ static void transform_dummies_for_chain(
             if (old_net->fanout_pins[i] == target_b_pin) {
                 for (int j = i; j < old_net->num_fanout_pins - 1; j++) {
                     old_net->fanout_pins[j] = old_net->fanout_pins[j + 1];
+                    // Update pin_net_idx for shifted pins
+                    if (old_net->fanout_pins[j] != NULL) {
+                        old_net->fanout_pins[j]->pin_net_idx = j;
+                    }
                 }
                 old_net->num_fanout_pins--;
                 break;
@@ -1488,9 +1506,8 @@ static void rewire_source_cin_to_padding(
     int cin_idx = source_adder->num_input_pins - 1;
     npin_t* cin_pin = source_adder->input_pins[cin_idx];
 
-    if (cin_pin == NULL) {
+    if (cin_pin == NULL)
         return;
-    }
 
     // Disconnect cin from its current net
     nnet_t* old_net = cin_pin->net;
@@ -1500,6 +1517,10 @@ static void rewire_source_cin_to_padding(
             if (old_net->fanout_pins[i] == cin_pin) {
                 for (int j = i; j < old_net->num_fanout_pins - 1; j++) {
                     old_net->fanout_pins[j] = old_net->fanout_pins[j + 1];
+                    // Update pin_net_idx for shifted pins
+                    if (old_net->fanout_pins[j] != NULL) {
+                        old_net->fanout_pins[j]->pin_net_idx = j;
+                    }
                 }
                 old_net->num_fanout_pins--;
                 break;
@@ -1510,9 +1531,8 @@ static void rewire_source_cin_to_padding(
 
     // Get padding's cout net (cout is output pin 0)
     npin_t* padding_cout_pin = padding->output_pins[0];
-    if (padding_cout_pin == NULL || padding_cout_pin->net == NULL) {
+    if (padding_cout_pin == NULL || padding_cout_pin->net == NULL)
         return;
-    }
 
     nnet_t* cout_net = padding_cout_pin->net;
 
@@ -1577,7 +1597,6 @@ void pad_cascaded_adder_chains(netlist_t* netlist)
             rewire_target_to_padding(padding, target_adder, netlist);
 
             // Rewire source chain's adder at this position to take cin from padding's cout
-            // This ensures the source chain flows: dummy -> padding -> source[pos] -> ...
             nnode_t* source_adder = get_chain_adder_at_position(pair.source_chain_head, pos);
             if (source_adder != NULL) {
                 rewire_source_cin_to_padding(source_adder, padding, netlist);
@@ -1587,6 +1606,11 @@ void pad_cascaded_adder_chains(netlist_t* netlist)
 
             // Add padding to processed list
             processed_adder_list = insert_in_vptr_list(processed_adder_list, padding);
+
+            // Add padding to netlist's internal_nodes so it's properly tracked
+            netlist->internal_nodes = (nnode_t**)vtr::realloc(netlist->internal_nodes,
+                sizeof(nnode_t*) * (netlist->num_internal_nodes + 1));
+            netlist->internal_nodes[netlist->num_internal_nodes++] = padding;
 
             prev_padding = padding;
             log("    Created padding adder: %s\n", padding->name);

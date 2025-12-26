@@ -323,10 +323,8 @@ typedef struct reducesol_struct {
     int *add_pairs;
 
     /* solution metrics: */
-    // actual number of adder operations (1 per binary pair).
-    int num_adders;
-    // sum of all adder output widths (for area estimation).
-    int total_bit_width;
+    // total number of adders used (after sharing).
+    int adder_count;
     // total number of terms included.
     int terms_included;
 
@@ -551,19 +549,15 @@ reducesol_t *getFromMemo(reducesol_t **memo, int *row_indices, int size) {
     return NULL;
 }
 
-// get the cost of the solution (lower is better).
-// Primary: minimize number of adders. Secondary: minimize total bit-width.
-float getCost(reducesol_t *sol) {
-    if (!sol) return std::numeric_limits<float>::max();
-    // num_adders is primary, total_bit_width is tie-breaker (scaled down)
-    return (float)sol->num_adders + (float)sol->total_bit_width / 10000.0f;
+// get the strength (terms included / final adder count) of the solution.
+float getStrength(reducesol_t *sol) {
+    if (!sol->adder_count) return 0;
+    return ((float) sol->terms_included) / ((float) sol->adder_count);
 }
 
-// compare solutions and return true if cur is better than best.
+// compare solutions and return true if best is to be updated.
 bool solBetterThanBest(reducesol_t *best, reducesol_t *cur) {
-    if (best == NULL) return true;
-    if (cur == NULL) return false;
-    return getCost(cur) < getCost(best);
+    return best == NULL || (getStrength(cur) >= getStrength(best));
 }
 
 // recursive top-down helper function.
@@ -589,8 +583,7 @@ reducesol_t *getOptimalRowReductionHelper(reducesol_t **memo, adderinst_t ***add
 
         // calculate metrics.
         adderinst_t *adderinst = adderinst_mat[row_indices[0]][row_indices[1]];
-        ret->num_adders = 1;  // one binary adder operation
-        ret->total_bit_width = adderinst->out_size;
+        ret->adder_count = adderinst->out_size;
         ret->terms_included = adderinst->terms_included;
 
         return ret;
@@ -665,10 +658,9 @@ reducesol_t *getOptimalRowReductionHelper(reducesol_t **memo, adderinst_t ***add
             /* create a new solution, merged with current solution. */
             // initial metrics, based on cur.
             int termsIncluded = cur->terms_included;
-            int numAdders = cur->num_adders;
-            int totalBitWidth = cur->total_bit_width;
+            int adderCount = cur->adder_count;
 
-            // see if adder chain already exists (for adder sharing/reuse).
+            // see if adder chain already exists.
             bool adderExists = false;
             for (k = 0; k < subSize; k += 2) {
                 if (adderinst == adderinst_mat[cur->add_pairs[k]][cur->add_pairs[k+1]]) {
@@ -678,50 +670,45 @@ reducesol_t *getOptimalRowReductionHelper(reducesol_t **memo, adderinst_t ***add
                 }
             }
 
-            // add adder metrics if adder is new (not reused).
+            // add adder count if non-existent.
             if (!adderExists) {
-                numAdders += 1;  // one new adder operation
-                totalBitWidth += adderinst->out_size;
+                adderCount += adderinst->out_size;
             }
 
             // calculate terms included.
             termsIncluded += adderinst->terms_included;
 
-            // create candidate solution.
-            reducesol_t *candidate = (reducesol_t *) vtr::malloc(sizeof(reducesol_t));
+            // make new solution if best is not yet existent.
+            if (best == NULL) {
+                best = (reducesol_t *) vtr::malloc(sizeof(reducesol_t));
 
-            // copy row indices.
-            candidate->row_indices = (int *) vtr::malloc(sizeof(int) * size);
-            memcpy(candidate->row_indices, row_indices, sizeof(int) * size);
+                // copy row indices.
+                best->row_indices = (int *) vtr::malloc(sizeof(int) * size);
+                memcpy(best->row_indices, row_indices, sizeof(int) * size);
 
-            // add adder pairs.
-            int *add_pairs = (int *) vtr::malloc(sizeof(int) * size);
-            memcpy(add_pairs + 2, cur->add_pairs, sizeof(int) * cur->size);
-            add_pairs[0] = r0;
-            add_pairs[1] = r1;
-            candidate->add_pairs = add_pairs;
+                // add adder pairs.
+                int *add_pairs = (int *) vtr::malloc(sizeof(int) * size);
+                memcpy(add_pairs + 2, cur->add_pairs, sizeof(int) * cur->size);
+                add_pairs[0] = r0;
+                add_pairs[1] = r1;
+                best->add_pairs = add_pairs;
 
-            // include metrics.
-            candidate->terms_included = termsIncluded;
-            candidate->num_adders = numAdders;
-            candidate->total_bit_width = totalBitWidth;
-            candidate->size = size;
-            candidate->next = NULL;
+                // include metrics.
+                best->terms_included = termsIncluded;
+                best->adder_count = adderCount;
+                best->size = size;
 
-            // compare with best and update if better.
-            if (solBetterThanBest(best, candidate)) {
-                // free old best if it exists
-                if (best != NULL) {
-                    vtr::free(best->row_indices);
-                    vtr::free(best->add_pairs);
-                    vtr::free(best);
-                }
-                best = candidate;
-            } else {
-                // free candidate
-                vtr::free(candidate->row_indices);
-                vtr::free(candidate->add_pairs);
-                vtr::free(candidate);
+            }
+            else if (solBetterThanBest(best, cur)) {
+                // copy new adder pairs.
+                memcpy(best->add_pairs + 2, cur->add_pairs, sizeof(int) * cur->size);
+                best->add_pairs[0] = r0;
+                best->add_pairs[1] = r1;
+
+                // update metrics.
+                best->adder_count = adderCount;
+                best->terms_included = termsIncluded;
+
             }
         }
     }
