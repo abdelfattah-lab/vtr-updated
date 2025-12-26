@@ -47,6 +47,7 @@
 #include "cluster_legalizer.h"
 #include "cluster_profiler.h"
 #include "cluster_util.h"
+#include "clustering_history_logger.h"
 #include "echo_files.h"
 #include "constraints_report.h"
 #include "greedy_seed_selector.h"
@@ -203,6 +204,12 @@ GreedyClusterer::do_clustering(ClusterLegalizer& cluster_legalizer,
             // If the previous strategy failed, try to grow the cluster again,
             // but this time perform full legalization for each molecule added
             // to the cluster.
+
+            // Log the retry with FULL strategy
+            if (g_clustering_history_logger && g_clustering_history_logger->is_enabled()) {
+                g_clustering_history_logger->log_iteration_start(2, ClusterLegalizationStrategy::FULL);
+            }
+
             new_cluster_id = try_grow_cluster(seed_mol,
                                               ClusterLegalizationStrategy::FULL,
                                               cluster_legalizer,
@@ -430,6 +437,17 @@ LegalizationClusterId GreedyClusterer::try_grow_cluster(
         CLUSTER_PROFILE_END_PHASE("legality_check");
 
         if (!is_cluster_legal) {
+            // Log CLB creation failure due to final legality check
+            if (g_clustering_history_logger && g_clustering_history_logger->is_enabled()) {
+                g_clustering_history_logger->log_candidate_failure_stats();
+                g_clustering_history_logger->log_routing_stats();
+                g_clustering_history_logger->log_clb_failure(
+                    legalization_cluster_id,
+                    "Final intra-LB routing check failed (congestion)",
+                    strategy);
+                g_clustering_history_logger->log_clb_timing();
+            }
+
             // If the cluster is not legal, undo the cluster.
             // Update the used type instances.
             num_used_type_instances[cluster_legalizer.get_cluster_type(legalization_cluster_id)]--;
@@ -462,6 +480,18 @@ LegalizationClusterId GreedyClusterer::try_grow_cluster(
         if (external_terminals < packer_opts_.transitive_fanout_threshold && external_terminals > 0) {
             clb_inter_blk_nets[legalization_cluster_id].push_back(mnet_id);
         }
+    }
+
+    // Log CLB creation success
+    if (g_clustering_history_logger && g_clustering_history_logger->is_enabled()) {
+        g_clustering_history_logger->log_candidate_failure_stats();
+        g_clustering_history_logger->log_routing_stats();
+        g_clustering_history_logger->log_clb_success(
+            legalization_cluster_id,
+            cluster_legalizer.get_cluster_pb(legalization_cluster_id),
+            cluster_legalizer.get_cluster_molecules(legalization_cluster_id),
+            strategy);
+        g_clustering_history_logger->log_clb_timing();
     }
 
     // Since the cluster will no longer be added to beyond this point,
@@ -606,6 +636,15 @@ bool GreedyClusterer::try_add_candidate_mol_to_cluster(t_pack_molecule* candidat
 
     e_block_pack_status pack_status = cluster_legalizer.add_mol_to_cluster(candidate_mol,
                                                                            legalization_cluster_id);
+
+    // Record candidate failure for logging
+    if (pack_status != e_block_pack_status::BLK_PASSED) {
+        if (g_clustering_history_logger) {
+            AtomBlockId blk_id = candidate_mol->atom_block_ids[candidate_mol->root];
+            const t_model* blk_model = atom_netlist_.block_model(blk_id);
+            g_clustering_history_logger->record_candidate_failure(pack_status, blk_model->name);
+        }
+    }
 
     // Print helpful debugging log messages.
     if (log_verbosity_ > 2) {

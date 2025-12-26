@@ -12,6 +12,7 @@
 
 #include "cluster_legalizer.h"
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <tuple>
@@ -22,6 +23,7 @@
 #include "cluster_profiler.h"
 #include "cluster_router.h"
 #include "cluster_util.h"
+#include "clustering_history_logger.h"
 #include "globals.h"
 #include "logic_types.h"
 #include "netlist_utils.h"
@@ -1623,7 +1625,29 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
             bool is_routed = false;
             bool do_detailed_routing_stage = (cluster_legalization_strategy_ == ClusterLegalizationStrategy::FULL);
             if (do_detailed_routing_stage) {
+                // Set routing source and molecule type for statistics tracking
+                if (g_clustering_history_logger) {
+                    g_clustering_history_logger->set_routing_source(
+                        ClusteringHistoryLogger::RoutingSource::MOLECULE);
+                    // Determine molecule type for failure breakdown
+                    std::string mol_type;
+                    if (molecule->pack_pattern && molecule->pack_pattern->name) {
+                        mol_type = molecule->pack_pattern->name;
+                    } else if (molecule->num_blocks > 0 && molecule->atom_block_ids[molecule->root].is_valid()) {
+                        // Use atom model name for single-atom molecules
+                        const auto* model = atom_ctx.nlist.block_model(molecule->atom_block_ids[molecule->root]);
+                        mol_type = model ? model->name : "single_atom";
+                    } else {
+                        mol_type = "unknown";
+                    }
+                    g_clustering_history_logger->set_current_molecule_type(mol_type);
+                }
+                bool first_attempt = true;
                 do {
+                    if (!first_attempt && g_clustering_history_logger) {
+                        g_clustering_history_logger->record_mode_retry();
+                    }
+                    first_attempt = false;
                     reset_intra_lb_route(cluster.router_data);
                     is_routed = try_intra_lb_route(cluster.router_data, log_verbosity_, &mode_status);
                 } while (do_detailed_routing_stage && mode_status.is_mode_issue());
@@ -1634,6 +1658,8 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
                 VTR_LOGV(log_verbosity_ > 4, "\t\t\tFAILED Detailed Routing Legality\n");
                 CLUSTER_PROFILE_ROUTING_FAILURE();
                 block_pack_status = e_block_pack_status::BLK_FAILED_ROUTE;
+
+                // Routing failure details will be logged at CLB level in start_new_cluster()
             } else {
                 /* Pack successful, commit
                  * TODO: SW Engineering note - may want to update cluster stats here too instead of doing it outside
@@ -1696,6 +1722,8 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
 
                 // Update the lookahead pins used.
                 commit_lookahead_pins_used(cluster.pb);
+
+                // Success will be logged at CLB level in start_new_cluster()
             }
         }
 
@@ -1722,6 +1750,8 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
              * Before trying to pack next molecule the unused pbs need to be freed and, the most important,
              * their modes reset. This task is performed by the cleanup_pb() function below. */
             cleanup_pb(cluster.pb);
+
+            // Failures will be logged at CLB level in start_new_cluster()
         } else {
             VTR_LOGV(log_verbosity_ > 3, "\t\tPASSED pack molecule\n");
         }
@@ -1778,6 +1808,14 @@ ClusterLegalizer::start_new_cluster(t_pack_molecule* molecule,
     // (meaning all cluster pins are allowed to be used).
     const t_ext_pin_util FULL_EXTERNAL_PIN_UTIL(1., 1.);
     LegalizationClusterId new_cluster_id = LegalizationClusterId(legalization_cluster_ids_.size());
+
+    // Log the start of a new CLB creation
+    if (g_clustering_history_logger && g_clustering_history_logger->is_enabled()) {
+        g_clustering_history_logger->log_clb_start(new_cluster_id,
+                                                   cluster_type->name,
+                                                   molecule);
+    }
+
     e_block_pack_status pack_status = try_pack_molecule(molecule,
                                                         new_cluster,
                                                         new_cluster_id,
@@ -1796,7 +1834,42 @@ ClusterLegalizer::start_new_cluster(t_pack_molecule* molecule,
         legalization_clusters_.push_back(std::move(new_cluster));
         // Update the molecule to cluster map.
         molecule_cluster_[molecule] = new_cluster_id;
+
+        // Note: CLB success is logged later in greedy_clusterer.cpp when the
+        // cluster is truly finalized (after passing final legality check)
     } else {
+        // Log CLB creation failure with timing and details
+        if (g_clustering_history_logger && g_clustering_history_logger->is_enabled()) {
+            std::string reason;
+            switch (pack_status) {
+                case e_block_pack_status::BLK_FAILED_FEASIBLE:
+                    reason = "No feasible primitive location";
+                    break;
+                case e_block_pack_status::BLK_FAILED_ROUTE:
+                    reason = "Intra-LB routing failed (congestion)";
+                    break;
+                case e_block_pack_status::BLK_FAILED_FLOORPLANNING:
+                    reason = "Floorplanning constraint violation";
+                    break;
+                case e_block_pack_status::BLK_FAILED_NOC_GROUP:
+                    reason = "NoC group incompatibility";
+                    break;
+                default:
+                    reason = "Unknown failure";
+            }
+            g_clustering_history_logger->log_clb_failure(new_cluster_id, reason, cluster_legalization_strategy_);
+
+            // For routing failures, log congestion details before freeing router_data
+            if (pack_status == e_block_pack_status::BLK_FAILED_ROUTE && new_cluster.router_data) {
+                g_clustering_history_logger->log_routing_failure(molecule,
+                                                                 new_cluster.router_data,
+                                                                 nullptr,  // primitives not available here
+                                                                 0);
+            }
+
+            g_clustering_history_logger->log_clb_timing();
+        }
+
         // Delete the new_cluster.
         free_pb(new_cluster.pb);
         delete new_cluster.pb;
@@ -1933,6 +2006,14 @@ bool ClusterLegalizer::check_cluster_legality(LegalizationClusterId cluster_id) 
     VTR_ASSERT_SAFE(cluster_id.is_valid() && (size_t)cluster_id < legalization_clusters_.size());
     // To check if a cluster is fully legal, try to perform an intra logic block
     // route on the cluster. If it succeeds, the cluster is fully legal.
+
+    // Set routing source for statistics tracking
+    if (g_clustering_history_logger) {
+        g_clustering_history_logger->set_routing_source(
+            ClusteringHistoryLogger::RoutingSource::LEGALITY);
+        g_clustering_history_logger->set_current_molecule_type("legality_check");
+    }
+
     t_mode_selection_status mode_status;
     LegalizationCluster& cluster = legalization_clusters_[cluster_id];
     return try_intra_lb_route(cluster.router_data, log_verbosity_, &mode_status);
@@ -1981,6 +2062,11 @@ ClusterLegalizer::ClusterLegalizer(const AtomNetlist& atom_netlist,
     enable_pin_feasibility_filter_ = enable_pin_feasibility_filter;
     feasible_block_array_size_ = feasible_block_array_size;
     log_verbosity_ = log_verbosity;
+
+    // Initialize the clustering history logger
+    if (g_clustering_history_logger == nullptr) {
+        g_clustering_history_logger = new ClusteringHistoryLogger();
+    }
 }
 
 void ClusterLegalizer::reset() {
@@ -2114,5 +2200,11 @@ ClusterLegalizer::~ClusterLegalizer() {
         if (!cluster_id.is_valid())
             continue;
         destroy_cluster(cluster_id);
+    }
+
+    // Clean up the clustering history logger
+    if (g_clustering_history_logger != nullptr) {
+        delete g_clustering_history_logger;
+        g_clustering_history_logger = nullptr;
     }
 }

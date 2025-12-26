@@ -1903,11 +1903,30 @@ static void print_pack_molecules(const char* fname,
 
                                 // Show if this is a driver or sink
                                 if (atom_nlist.net_driver(net_id) == pin_id) {
-                                    fprintf(fp, " (driver)");
+                                    fprintf(fp, " (driver, fanout=%zu)\n", atom_nlist.net_sinks(net_id).size());
+                                    // Print all destinations of this driver
+                                    for (auto sink_pin_id : atom_nlist.net_sinks(net_id)) {
+                                        AtomBlockId sink_blk = atom_nlist.pin_block(sink_pin_id);
+                                        AtomPortId sink_port = atom_nlist.pin_port(sink_pin_id);
+                                        fprintf(fp, "\t\t\t-> sink: %s.%s[%zu]\n",
+                                                atom_nlist.block_name(sink_blk).c_str(),
+                                                atom_nlist.port_name(sink_port).c_str(),
+                                                size_t(atom_nlist.pin_port_bit(sink_pin_id)));
+                                    }
                                 } else {
-                                    fprintf(fp, " (sink)");
+                                    // For sinks, show the driver
+                                    AtomPinId driver_pin = atom_nlist.net_driver(net_id);
+                                    if (driver_pin) {
+                                        AtomBlockId driver_blk = atom_nlist.pin_block(driver_pin);
+                                        AtomPortId driver_port = atom_nlist.pin_port(driver_pin);
+                                        fprintf(fp, " (sink <- %s.%s[%zu])\n",
+                                                atom_nlist.block_name(driver_blk).c_str(),
+                                                atom_nlist.port_name(driver_port).c_str(),
+                                                size_t(atom_nlist.pin_port_bit(driver_pin)));
+                                    } else {
+                                        fprintf(fp, " (sink <- <no driver>)\n");
+                                    }
                                 }
-                                fprintf(fp, "\n");
                             }
                         }
                     }

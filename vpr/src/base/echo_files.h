@@ -17,6 +17,7 @@ enum e_echo_files {
     E_ECHO_CLUSTERS,
     E_ECHO_CHAIN_CLUSTERS,
     E_ECHO_CLUSTERING_PROFILE,
+    E_ECHO_CLUSTERING_HISTORY,
 
     //Legalizer
     E_ECHO_FLAT_PLACE,

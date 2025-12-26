@@ -34,6 +34,9 @@
 #include "pb_type_graph.h"
 #include "lb_type_rr_graph.h"
 #include "cluster_router.h"
+#include "clustering_history_logger.h"
+
+#include <chrono>
 
 /* #define PRINT_INTRA_LB_ROUTE */
 
@@ -403,10 +406,14 @@ static bool try_expand_nodes(t_lb_router_data* router_data,
 bool try_intra_lb_route(t_lb_router_data* router_data,
                         int verbosity,
                         t_mode_selection_status* mode_status) {
+    // Start timing for routing stats
+    auto route_start_time = std::chrono::high_resolution_clock::now();
+
     std::vector<t_intra_lb_net>& lb_nets = *router_data->intra_lb_nets;
     std::vector<t_lb_type_rr_node>& lb_type_graph = *router_data->lb_type_graph;
     bool is_routed = false;
     bool is_impossible = false;
+    int final_iteration_count = 0;  // Track iterations for stats
 
     mode_status->is_mode_conflict = false;
     mode_status->try_expand_all_modes = false;
@@ -434,6 +441,7 @@ bool try_intra_lb_route(t_lb_router_data* router_data,
      * Cap the total number of iterations tried so that if a solution does not exist, then the router won't run indefinitely */
     router_data->pres_con_fac = router_data->params.pres_fac;
     for (int iter = 0; iter < router_data->params.max_iterations && !is_routed && !is_impossible; iter++) {
+        final_iteration_count = iter + 1;  // Track iteration count (1-based)
         unsigned int inet;
         /* Iterate across all nets internal to logic block */
         for (inet = 0; inet < lb_nets.size() && !is_impossible; inet++) {
@@ -535,6 +543,22 @@ bool try_intra_lb_route(t_lb_router_data* router_data,
             lb_nets[inet].rt_tree = nullptr;
         }
     }
+
+    // Record routing statistics
+    if (g_clustering_history_logger) {
+        auto route_end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(route_end_time - route_start_time);
+        double elapsed_us = static_cast<double>(duration.count());
+
+        g_clustering_history_logger->record_routing_attempt(
+            lb_type_graph.size(),
+            lb_nets.size(),
+            final_iteration_count,
+            elapsed_us,
+            is_routed,
+            is_impossible);
+    }
+
     return is_routed;
 }
 
