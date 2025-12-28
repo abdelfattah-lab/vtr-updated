@@ -132,6 +132,51 @@ std::string ClusteringHistoryLogger::get_placement_description(t_pb_graph_node* 
     return desc;
 }
 
+std::string ClusteringHistoryLogger::get_placement_description_with_mode(const t_pb* atom_pb) const {
+    if (!atom_pb || !atom_pb->pb_graph_node) {
+        return "<no placement>";
+    }
+
+    std::string desc;
+
+    // Build path from root to primitive, including mode information from t_pb
+    std::vector<std::string> path;
+    const t_pb* curr_pb = atom_pb;
+
+    while (curr_pb != nullptr) {
+        const t_pb_graph_node* gnode = curr_pb->pb_graph_node;
+        if (gnode && gnode->pb_type && gnode->pb_type->name) {
+            std::string node_name = gnode->pb_type->name;
+            node_name += "[" + std::to_string(gnode->placement_index) + "]";
+
+            // Add mode name if this node has multiple modes and a parent selected a mode
+            // The mode is stored on the pb and indicates which child mode is selected
+            if (gnode->pb_type->num_modes > 1 && curr_pb->mode >= 0 &&
+                curr_pb->mode < gnode->pb_type->num_modes) {
+                const char* mode_name = gnode->pb_type->modes[curr_pb->mode].name;
+                if (mode_name) {
+                    node_name += "[" + std::string(mode_name) + "]";
+                }
+            }
+
+            path.push_back(node_name);
+        } else if (gnode) {
+            path.push_back("<unknown>[" + std::to_string(gnode->placement_index) + "]");
+        }
+        curr_pb = curr_pb->parent_pb;
+    }
+
+    // Reverse to get root-to-leaf order
+    for (auto it = path.rbegin(); it != path.rend(); ++it) {
+        if (!desc.empty()) {
+            desc += "/";
+        }
+        desc += *it;
+    }
+
+    return desc;
+}
+
 std::string ClusteringHistoryLogger::describe_congestion(const t_lb_router_data* router_data) const {
     if (!router_data || !router_data->lb_type_graph || !router_data->lb_rr_node_stats) {
         return "  <No routing data available>\n";
@@ -361,7 +406,7 @@ void ClusteringHistoryLogger::log_clb_success(LegalizationClusterId cluster_id,
         }
         file_ << "\n";
 
-        // List atoms and their placements
+        // List atoms and their placements (with mode info)
         int num_atoms = static_cast<int>(mol->atom_block_ids.size());
         int limit = std::min(mol->num_blocks, num_atoms);
         for (int j = 0; j < limit; j++) {
@@ -370,8 +415,8 @@ void ClusteringHistoryLogger::log_clb_success(LegalizationClusterId cluster_id,
 
             const t_pb* atom_pb = atom_ctx.lookup.atom_pb(atom_id);
             file_ << "          Atom: " << atom_ctx.nlist.block_name(atom_id);
-            if (atom_pb && atom_pb->pb_graph_node) {
-                file_ << " @ " << get_placement_description(atom_pb->pb_graph_node);
+            if (atom_pb) {
+                file_ << " @ " << get_placement_description_with_mode(atom_pb);
             }
             file_ << "\n";
         }
@@ -382,12 +427,53 @@ void ClusteringHistoryLogger::log_clb_success(LegalizationClusterId cluster_id,
 
 void ClusteringHistoryLogger::log_clb_failure(LegalizationClusterId cluster_id,
                                                const std::string& reason,
-                                               ClusterLegalizationStrategy strategy) {
+                                               ClusterLegalizationStrategy strategy,
+                                               const t_pb* cluster_pb,
+                                               const std::vector<t_pack_molecule*>* molecules) {
     if (!file_.is_open()) return;
 
     file_ << "  CLB CREATION: FAILED\n";
     file_ << "    Route type: " << strategy_to_string(strategy) << "\n";
     file_ << "    Reason: " << reason << "\n";
+
+    // If molecules are provided, show the attempted packing (useful for debugging SKIP_INTRA_LB_ROUTE failures)
+    if (molecules && !molecules->empty()) {
+        file_ << "    Total molecules attempted: " << molecules->size() << "\n";
+
+        if (cluster_pb && cluster_pb->name) {
+            file_ << "    CLB name: " << cluster_pb->name << "\n";
+        }
+
+        // List all molecules and their placements (similar to log_clb_success)
+        file_ << "    Attempted molecules:\n";
+        const auto& atom_ctx = g_vpr_ctx.atom();
+        for (size_t i = 0; i < molecules->size(); i++) {
+            const t_pack_molecule* mol = (*molecules)[i];
+            if (!mol) continue;
+
+            file_ << "      [" << i << "] Root: " << get_atom_name(mol, mol->root);
+            if (mol->pack_pattern && mol->pack_pattern->name) {
+                file_ << " (pattern: " << mol->pack_pattern->name << ")";
+            }
+            file_ << "\n";
+
+            // List atoms and their placements (with mode info)
+            int num_atoms = static_cast<int>(mol->atom_block_ids.size());
+            int limit = std::min(mol->num_blocks, num_atoms);
+            for (int j = 0; j < limit; j++) {
+                AtomBlockId atom_id = mol->atom_block_ids[j];
+                if (!atom_id.is_valid()) continue;
+
+                const t_pb* atom_pb = atom_ctx.lookup.atom_pb(atom_id);
+                file_ << "          Atom: " << atom_ctx.nlist.block_name(atom_id);
+                if (atom_pb) {
+                    file_ << " @ " << get_placement_description_with_mode(atom_pb);
+                }
+                file_ << "\n";
+            }
+        }
+    }
+
     file_ << "\n";
     file_.flush();
 }
@@ -400,6 +486,71 @@ void ClusteringHistoryLogger::log_clb_timing() {
     double elapsed_ms = duration.count() / 1000.0;
 
     file_ << "  Time elapsed: " << std::fixed << std::setprecision(3) << elapsed_ms << " ms\n";
+    file_ << "\n";
+    file_.flush();
+}
+
+void ClusteringHistoryLogger::log_feasibility_failure(const t_pack_molecule* molecule,
+                                                       int num_placements_tried,
+                                                       const std::string& last_failure_reason,
+                                                       const std::vector<std::string>& all_placement_attempts) {
+    if (!file_.is_open()) return;
+
+    const auto& atom_ctx = g_vpr_ctx.atom();
+
+    file_ << "  FEASIBILITY FAILURE DETAILS:\n";
+    file_ << "    Primitive placements tried: " << num_placements_tried << "\n";
+
+    // Print all placement attempts
+    if (!all_placement_attempts.empty()) {
+        file_ << "    All placement attempts:\n";
+        for (const auto& attempt : all_placement_attempts) {
+            file_ << "      " << attempt << "\n";
+        }
+    }
+
+    file_ << "    Last failure reason: " << last_failure_reason << "\n";
+
+    if (molecule) {
+        file_ << "    Molecule info:\n";
+        file_ << "      Type: ";
+        if (molecule->type == MOLECULE_SINGLE_ATOM) {
+            file_ << "single_atom";
+        } else if (molecule->pack_pattern && molecule->pack_pattern->name) {
+            file_ << molecule->pack_pattern->name;
+        } else {
+            file_ << "forced_pack";
+        }
+        file_ << "\n";
+        file_ << "      Num blocks: " << molecule->num_blocks << "\n";
+
+        if (molecule->is_chain() && molecule->chain_info) {
+            file_ << "      Chain info:\n";
+            file_ << "        is_long_chain: " << molecule->chain_info->is_long_chain << "\n";
+            file_ << "        chain_id: " << molecule->chain_info->chain_id << "\n";
+            file_ << "        required_entry_chain_id: " << molecule->required_entry_chain_id << "\n";
+        }
+
+        // List all atoms in the molecule
+        file_ << "      Atoms in molecule:\n";
+        for (int i = 0; i < molecule->num_blocks; i++) {
+            AtomBlockId atom_id = molecule->atom_block_ids[i];
+            if (!atom_id.is_valid()) {
+                file_ << "        [" << i << "] <empty>\n";
+                continue;
+            }
+            const t_model* model = atom_ctx.nlist.block_model(atom_id);
+            file_ << "        [" << i << "] " << atom_ctx.nlist.block_name(atom_id);
+            if (model) {
+                file_ << " (primitive: " << model->name << ")";
+            }
+            if (molecule->root == i) {
+                file_ << " [ROOT]";
+            }
+            file_ << "\n";
+        }
+    }
+
     file_ << "\n";
     file_.flush();
 }

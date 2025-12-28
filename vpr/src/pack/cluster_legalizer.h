@@ -600,5 +600,14 @@ private:
     /// @brief The prepacker object that stores the molecules which will be
     ///        legalized into clusters.
     const Prepacker& prepacker_;
+
+    /// @brief Struct to store failure info from the last try_pack_molecule call
+    ///        for CLB-level logging.
+    struct MoleculeFailureInfo {
+        int num_placements_tried = 0;
+        std::string last_failure_reason = "Unknown";
+        std::vector<std::string> all_placement_attempts;
+    };
+    mutable MoleculeFailureInfo last_molecule_failure_info_;
 };
 

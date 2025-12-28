@@ -132,10 +132,14 @@ public:
      * @param cluster_id    The ID of the failed cluster attempt.
      * @param reason        Human-readable reason for failure.
      * @param strategy      The legalization strategy used.
+     * @param cluster_pb    Optional: The pb structure of the cluster (to show attempted placements).
+     * @param molecules     Optional: The molecules that were packed before failure.
      */
     void log_clb_failure(LegalizationClusterId cluster_id,
                          const std::string& reason,
-                         ClusterLegalizationStrategy strategy);
+                         ClusterLegalizationStrategy strategy,
+                         const t_pb* cluster_pb = nullptr,
+                         const std::vector<t_pack_molecule*>* molecules = nullptr);
 
     /**
      * @brief Log timing for the current CLB creation.
@@ -143,6 +147,19 @@ public:
      * Call this when done with a CLB to record elapsed time.
      */
     void log_clb_timing();
+
+    /**
+     * @brief Log details about feasibility failure for a molecule.
+     *
+     * @param molecule              The molecule that failed to pack.
+     * @param num_placements_tried  How many primitive placements were attempted.
+     * @param last_failure_reason   Description of the last failure reason.
+     * @param all_placement_attempts  All placement attempts with their results.
+     */
+    void log_feasibility_failure(const t_pack_molecule* molecule,
+                                  int num_placements_tried,
+                                  const std::string& last_failure_reason,
+                                  const std::vector<std::string>& all_placement_attempts);
 
     /**
      * @brief Record a candidate molecule packing failure.
@@ -267,9 +284,17 @@ private:
     std::string get_atom_name(const t_pack_molecule* molecule, int index) const;
 
     /**
-     * @brief Get primitive placement description.
+     * @brief Get primitive placement description (without mode info).
      */
     std::string get_placement_description(t_pb_graph_node* primitive) const;
+
+    /**
+     * @brief Get primitive placement description with mode information.
+     *
+     * This version walks up the t_pb hierarchy to show which mode was
+     * selected at each level (e.g., "ble5[0][arithmetic_2chains]").
+     */
+    std::string get_placement_description_with_mode(const t_pb* atom_pb) const;
 
     /**
      * @brief Get congestion description for routing nodes.

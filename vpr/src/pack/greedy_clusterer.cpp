@@ -438,13 +438,19 @@ LegalizationClusterId GreedyClusterer::try_grow_cluster(
 
         if (!is_cluster_legal) {
             // Log CLB creation failure due to final legality check
+            // Include the attempted molecules and placements for debugging
             if (g_clustering_history_logger && g_clustering_history_logger->is_enabled()) {
                 g_clustering_history_logger->log_candidate_failure_stats();
                 g_clustering_history_logger->log_routing_stats();
+                // Get molecules and pb before the cluster is destroyed
+                const auto& attempted_molecules = cluster_legalizer.get_cluster_molecules(legalization_cluster_id);
+                const t_pb* attempted_pb = cluster_legalizer.get_cluster_pb(legalization_cluster_id);
                 g_clustering_history_logger->log_clb_failure(
                     legalization_cluster_id,
                     "Final intra-LB routing check failed (congestion)",
-                    strategy);
+                    strategy,
+                    attempted_pb,
+                    &attempted_molecules);
                 g_clustering_history_logger->log_clb_timing();
             }
 

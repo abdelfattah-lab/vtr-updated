@@ -1527,3 +1527,50 @@ void reset_intra_lb_route(t_lb_router_data* router_data) {
         pin->parent_node->illegal_modes.clear();
     }
 }
+
+std::string describe_routing_failure(const t_lb_router_data* router_data,
+                                     const t_mode_selection_status& mode_status) {
+    std::string description;
+
+    // Check for mode conflict
+    if (mode_status.is_mode_conflict) {
+        description += "Mode conflict detected. ";
+    }
+
+    // Find congested nodes
+    const auto& lb_type_graph = *router_data->lb_type_graph;
+    const auto& lb_rr_node_stats = router_data->lb_rr_node_stats;
+    auto congested_rr_nodes = find_congested_rr_nodes(lb_type_graph, lb_rr_node_stats);
+
+    if (!congested_rr_nodes.empty()) {
+        description += vtr::string_fmt("Congestion on %zu node(s): ", congested_rr_nodes.size());
+
+        // Describe first few congested nodes
+        int count = 0;
+        for (int inode : congested_rr_nodes) {
+            if (count >= 3) {
+                description += "...";
+                break;
+            }
+            const t_lb_type_rr_node& rr_node = lb_type_graph[inode];
+            description += vtr::string_fmt("[node %d occ=%d/cap=%d",
+                                           inode,
+                                           lb_rr_node_stats[inode].occ,
+                                           rr_node.capacity);
+            if (rr_node.pb_graph_pin) {
+                description += " pin=" + rr_node.pb_graph_pin->to_string(false);
+            }
+            description += "] ";
+            count++;
+        }
+    } else if (!mode_status.is_mode_conflict) {
+        // No congestion and no mode conflict - might be impossible route (no path exists)
+        description += "No valid routing path found (routing impossible).";
+    }
+
+    if (description.empty()) {
+        description = "Unknown routing failure";
+    }
+
+    return description;
+}

@@ -366,6 +366,11 @@ bool pb_graph_nodes_equivalent(const t_pb_graph_node* node1,
     return (curr1 == nullptr && curr2 == nullptr);
 }
 
+// Thread-local storage for detailed placement failure reason
+// This is set by try_place_atom_block_rec and check_chain_root_placement_feasibility,
+// and read by try_pack_molecule
+static thread_local std::string g_placement_failure_reason;
+
 /**
  * @brief This function takes the root block of a chain molecule and a proposed
  *        placement primitive for this block. The function then checks if this
@@ -417,12 +422,23 @@ static enum e_block_pack_status check_chain_root_placement_feasibility(const t_p
         if (req_entry != -1) {
             // Ensure this pattern supports the required entry
             if (req_entry >= static_cast<int>(chain_root_pins.size())) {
+                g_placement_failure_reason = "Chain required_entry " + std::to_string(req_entry) +
+                                              " >= chain_root_pins.size() " + std::to_string(chain_root_pins.size());
                 return e_block_pack_status::BLK_FAILED_FEASIBLE;
             }
 
             // Must place at tieOff 0 of the required entry (long chain constraint)
-            if (!pb_graph_nodes_equivalent(pb_graph_node,
-                    chain_root_pins[req_entry][0]->parent_node)) {
+            // Check against ALL pins for this chain (from different modes)
+            bool req_entry_match = false;
+            for (const auto* pin : chain_root_pins[req_entry]) {
+                if (pb_graph_nodes_equivalent(pb_graph_node, pin->parent_node)) {
+                    req_entry_match = true;
+                    break;
+                }
+            }
+            if (!req_entry_match) {
+                g_placement_failure_reason = "Chain required_entry constraint: placement location doesn't match required entry " +
+                                              std::to_string(req_entry) + " tieOff 0";
                 return e_block_pack_status::BLK_FAILED_FEASIBLE;
             }
 
@@ -438,15 +454,52 @@ static enum e_block_pack_status check_chain_root_placement_feasibility(const t_p
             // Use mode-independent comparison since pack pattern may have been
             // discovered in a different mode than the one used during clustering
             if (chain_id >= static_cast<int>(chain_root_pins.size())) {
+                std::string available_chains;
+                for (size_t i = 0; i < chain_root_pins.size(); i++) {
+                    if (!available_chains.empty()) available_chains += "\n";
+                    // Show first pin from each chain as representative
+                    available_chains += std::string("      chain[") + std::to_string(i) + "]: " +
+                                        chain_root_pins[i][0]->parent_node->hierarchical_type_name() +
+                                        " (" + std::to_string(chain_root_pins[i].size()) + " mode variants)";
+                }
+                g_placement_failure_reason = "Chain ID " + std::to_string(chain_id) +
+                                              " >= chain_root_pins.size() " + std::to_string(chain_root_pins.size()) +
+                                              " (architecture doesn't have enough chain rows)\n" +
+                                              "      Tried to place: " + pb_graph_node->hierarchical_type_name() + "\n" +
+                                              "      Available chain rows:\n" + available_chains;
                 block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
-            } else if (!pb_graph_nodes_equivalent(pb_graph_node, chain_root_pins[chain_id][0]->parent_node)) {
-                block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
+            } else {
+                // Check if the proposed placement matches ANY of the stored chain root pins
+                // for this chain_id. We store pins from multiple modes, and pb_graph_nodes_equivalent()
+                // compares by pb_type name and placement index (mode-independent).
+                bool found_match = false;
+                for (const auto* pin : chain_root_pins[chain_id]) {
+                    if (pb_graph_nodes_equivalent(pb_graph_node, pin->parent_node)) {
+                        found_match = true;
+                        break;
+                    }
+                }
+                if (!found_match) {
+                    std::string expected_locations;
+                    for (const auto* pin : chain_root_pins[chain_id]) {
+                        if (!expected_locations.empty()) expected_locations += "\n";
+                        expected_locations += std::string("      - ") + pin->parent_node->hierarchical_type_name();
+                    }
+                    g_placement_failure_reason = "Chain ID " + std::to_string(chain_id) +
+                                                  " placement mismatch:\n" +
+                                                  "      Tried:    " + pb_graph_node->hierarchical_type_name() + "\n" +
+                                                  "      Expected one of (chain row " + std::to_string(chain_id) + " tieOff 0):\n" +
+                                                  expected_locations;
+                    block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
+                }
             }
             // the chain doesn't have an assigned chain_id yet
         } else {
             block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
+            std::string checked_locations;
             int chain_idx = 0;
             for (const auto& chain : chain_root_pins) {
+                int tieOff_idx = 0;
                 for (auto tieOff : chain) {
                     // check if this chosen primitive is one of the possible
                     // starting points for this chain.
@@ -458,10 +511,25 @@ static enum e_block_pack_status check_chain_root_placement_feasibility(const t_p
                         block_pack_status = e_block_pack_status::BLK_PASSED;
                         break;
                     }
-                    // long chains should only be placed at the top of the chain tieOff = 0
-                    if (is_long_chain) break;
+                    // Record what we checked
+                    if (!checked_locations.empty()) checked_locations += "\n";
+                    checked_locations += std::string("      chain[") + std::to_string(chain_idx) + "] entry[" +
+                                         std::to_string(tieOff_idx) + "]: " +
+                                         tieOff->parent_node->hierarchical_type_name();
+                    // Note: We no longer break for is_long_chain here because chain_root_pins now
+                    // contains multiple mode variants for the same logical position. We need to
+                    // check all variants to find one that matches via pb_graph_nodes_equivalent().
+                    tieOff_idx++;
                 }
                 if (block_pack_status == e_block_pack_status::BLK_PASSED) break;
+                chain_idx++;
+            }
+            // If no match found, set detailed failure reason
+            if (block_pack_status == e_block_pack_status::BLK_FAILED_FEASIBLE) {
+                g_placement_failure_reason = std::string("No matching chain entry point found:\n") +
+                                              "      Tried to place: " + pb_graph_node->hierarchical_type_name() + "\n" +
+                                              "      is_long_chain: " + (is_long_chain ? "true" : "false") + "\n" +
+                                              "      Valid chain entry points checked:\n" + checked_locations;
             }
         }
     }
@@ -641,6 +709,8 @@ try_place_atom_block_rec(const t_pb_graph_node* pb_graph_node,
     } else {
         /* if this is not the first child of this parent, must match existing parent mode */
         if (parent_pb->mode != pb_graph_node->pb_type->parent_mode->index) {
+            g_placement_failure_reason = "Mode conflict: parent mode " + std::to_string(parent_pb->mode) +
+                                          " != required mode " + std::to_string(pb_graph_node->pb_type->parent_mode->index);
             return e_block_pack_status::BLK_FAILED_FEASIBLE;
         }
     }
@@ -666,6 +736,7 @@ try_place_atom_block_rec(const t_pb_graph_node* pb_graph_node,
      * Early exit to flag failure
      */
     if (true == pb_type->parent_mode->disable_packing) {
+        g_placement_failure_reason = "Packing disabled for mode: " + std::string(pb_type->parent_mode->name);
         return e_block_pack_status::BLK_FAILED_FEASIBLE;
     }
 
@@ -686,6 +757,14 @@ try_place_atom_block_rec(const t_pb_graph_node* pb_graph_node,
         add_atom_as_target(router_data, blk_id);
         if (!primitive_feasible(blk_id, pb)) {
             block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
+            // Check why primitive_feasible failed
+            AtomBlockId cur_pb_blk_id = atom_ctx.lookup.pb_atom(pb);
+            if (cur_pb_blk_id && cur_pb_blk_id != blk_id) {
+                g_placement_failure_reason = "Primitive already occupied by: " +
+                                              atom_ctx.nlist.block_name(cur_pb_blk_id);
+            } else {
+                g_placement_failure_reason = "primitive_feasible() failed (type mismatch or memory sibling issue)";
+            }
         } else {
         }
 
@@ -1254,12 +1333,15 @@ static void update_molecule_chain_info(t_pack_molecule* chain_molecule, const t_
     // total number of adders in the cluster. Therefore, it should
     // always be placed at the very first adder in this cluster.
     // Use mode-independent comparison since pack pattern may have been
-    // discovered in a different mode than the one used during clustering
+    // discovered in a different mode than the one used during clustering.
+    // Check against ALL pins in each chain (from different modes).
     for (size_t chainId = 0; chainId < chain_root_pins.size(); chainId++) {
-        if (pb_graph_nodes_equivalent(chain_root_pins[chainId][0]->parent_node, root_primitive)) {
-            chain_molecule->chain_info->chain_id = chainId;
-            chain_molecule->chain_info->first_packed_molecule = chain_molecule;
-            return;
+        for (const auto* pin : chain_root_pins[chainId]) {
+            if (pb_graph_nodes_equivalent(pin->parent_node, root_primitive)) {
+                chain_molecule->chain_info->chain_id = chainId;
+                chain_molecule->chain_info->first_packed_molecule = chain_molecule;
+                return;
+            }
         }
     }
 
@@ -1538,16 +1620,38 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
 
     std::vector<t_pb_graph_node*> primitives_list(max_molecule_size_, nullptr);
     e_block_pack_status block_pack_status = e_block_pack_status::BLK_STATUS_UNDEFINED;
+
+    // Track failure information for detailed logging
+    int num_placements_tried = 0;
+    std::string last_failure_reason = "Unknown";
+    int last_failed_atom_idx = -1;
+
+    // Track ALL placement attempts for debugging
+    std::vector<std::string> all_placement_attempts;
+
     while (block_pack_status != e_block_pack_status::BLK_PASSED) {
         if (!get_next_primitive_list(cluster.placement_stats,
                                      molecule,
                                      primitives_list.data())) {
             VTR_LOGV(log_verbosity_ > 3, "\t\tFAILED No candidate primitives available\n");
             block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
+            if (num_placements_tried == 0) {
+                last_failure_reason = "No candidate primitive placements exist for this molecule type";
+            } else {
+                last_failure_reason = "Exhausted all " + std::to_string(num_placements_tried) + " candidate primitive placements";
+            }
             break; /* no more candidate primitives available, this molecule will not pack, return fail */
         }
 
+        num_placements_tried++;
         block_pack_status = e_block_pack_status::BLK_PASSED;
+        g_placement_failure_reason.clear();  // Reset for this placement attempt
+
+        // Record the root primitive being tried
+        std::string attempt_info = "Attempt " + std::to_string(num_placements_tried) + ": root=" +
+                                   (primitives_list[molecule->root] ?
+                                    primitives_list[molecule->root]->hierarchical_type_name() : "nullptr");
+
         int failed_location = 0;
         for (int i_mol = 0; i_mol < molecule_size && block_pack_status == e_block_pack_status::BLK_PASSED; i_mol++) {
             VTR_ASSERT((primitives_list[i_mol] == nullptr) == (!molecule->atom_block_ids[i_mol]));
@@ -1572,9 +1676,17 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
                                                          cluster.router_data,
                                                          log_verbosity_,
                                                          feasible_block_array_size_);
+            if (block_pack_status != e_block_pack_status::BLK_PASSED) {
+                last_failed_atom_idx = i_mol;
+                last_failure_reason = "Atom placement failed at molecule index " + std::to_string(i_mol) +
+                                      " (" + atom_ctx.nlist.block_name(atom_blk_id) + "): " +
+                                      g_placement_failure_reason;
+                attempt_info += " -> FAILED: " + g_placement_failure_reason;
+            }
         }
+
         if (block_pack_status == e_block_pack_status::BLK_PASSED) {
-            // VTR_LOG("ClusterLegalizer::try_pack_molecule: BLK_PASSED\n");
+            attempt_info += " -> placement PASSED";
         } else {
             // VTR_LOG("ClusterLegalizer::try_pack_molecule: BLK_FAILED_FEASIBLE\n");
             CLUSTER_PROFILE_PLACEMENT_FAILURE();
@@ -1586,6 +1698,8 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
             try_update_lookahead_pins_used(cluster.pb, atom_cluster_);
             if (!check_lookahead_pins_used(cluster.pb, max_external_pin_util)) {
                 block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
+                last_failure_reason = "Pin feasibility filter failed (exceeded external pin utilization)";
+                attempt_info += " -> pin feasibility FAILED";
             }
         }
 
@@ -1658,9 +1772,17 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
                 VTR_LOGV(log_verbosity_ > 4, "\t\t\tFAILED Detailed Routing Legality\n");
                 CLUSTER_PROFILE_ROUTING_FAILURE();
                 block_pack_status = e_block_pack_status::BLK_FAILED_ROUTE;
-
-                // Routing failure details will be logged at CLB level in start_new_cluster()
+                // Get detailed routing failure reason
+                std::string routing_failure_reason = describe_routing_failure(cluster.router_data, mode_status);
+                last_failure_reason = std::string("Intra-LB routing failed: ") + routing_failure_reason;
+                attempt_info += " -> routing FAILED (" + routing_failure_reason + ")";
             } else {
+                // Full success - placement, pin feasibility, and routing (if enabled) all passed
+                if (do_detailed_routing_stage) {
+                    attempt_info += " -> routing PASSED -> COMMITTED";
+                } else {
+                    attempt_info += " -> routing SKIPPED -> COMMITTED";
+                }
                 /* Pack successful, commit
                  * TODO: SW Engineering note - may want to update cluster stats here too instead of doing it outside
                  */
@@ -1727,6 +1849,9 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
             }
         }
 
+        // Record this attempt
+        all_placement_attempts.push_back(attempt_info);
+
         if (block_pack_status != e_block_pack_status::BLK_PASSED) {
             /* Pack unsuccessful, undo inserting molecule into cluster */
             for (int i = 0; i < failed_location; i++) {
@@ -1751,7 +1876,10 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
              * their modes reset. This task is performed by the cleanup_pb() function below. */
             cleanup_pb(cluster.pb);
 
-            // Failures will be logged at CLB level in start_new_cluster()
+            // Store failure details for CLB-level logging (only logged if entire CLB creation fails)
+            last_molecule_failure_info_.num_placements_tried = num_placements_tried;
+            last_molecule_failure_info_.last_failure_reason = last_failure_reason;
+            last_molecule_failure_info_.all_placement_attempts = all_placement_attempts;
         } else {
             VTR_LOGV(log_verbosity_ > 3, "\t\tPASSED pack molecule\n");
         }
@@ -1858,6 +1986,14 @@ ClusterLegalizer::start_new_cluster(t_pack_molecule* molecule,
                     reason = "Unknown failure";
             }
             g_clustering_history_logger->log_clb_failure(new_cluster_id, reason, cluster_legalization_strategy_);
+
+            // For feasibility failures, log detailed info about why no placement was found
+            if (pack_status == e_block_pack_status::BLK_FAILED_FEASIBLE) {
+                g_clustering_history_logger->log_feasibility_failure(molecule,
+                                                                      last_molecule_failure_info_.num_placements_tried,
+                                                                      last_molecule_failure_info_.last_failure_reason,
+                                                                      last_molecule_failure_info_.all_placement_attempts);
+            }
 
             // For routing failures, log congestion details before freeing router_data
             if (pack_status == e_block_pack_status::BLK_FAILED_ROUTE && new_cluster.router_data) {

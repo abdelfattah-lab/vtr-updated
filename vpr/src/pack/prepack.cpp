@@ -114,7 +114,7 @@ static void find_all_equivalent_chains(t_pack_patterns* chain_pattern, const t_p
 static void update_chain_root_pins(t_pack_patterns* chain_pattern,
                                    const std::vector<t_pb_graph_pin*>& chain_input_pins);
 
-static void get_all_connected_primitive_pins(const t_pb_graph_pin* cluster_input_pin, std::vector<t_pb_graph_pin*>& connected_primitive_pins, int pattern_id);
+static void get_all_connected_primitive_pins(const t_pb_graph_pin* pin, std::vector<t_pb_graph_pin*>& connected_primitive_pins, int pattern_id, bool filter_by_pattern);
 
 static void init_molecule_chain_info(const AtomBlockId blk_id,
                                      t_pack_molecule* molecule,
@@ -1827,9 +1827,13 @@ static void print_pack_molecules(const char* fname,
     list_of_molecules_current = list_of_molecules;
     while (list_of_molecules_current != nullptr) {
         if (list_of_molecules_current->type == MOLECULE_SINGLE_ATOM) {
-            fprintf(fp, "\nmolecule type: atom\n");
-            fprintf(fp, "\tpattern index %d: atom block %s\n", i,
-                    atom_nlist.block_name(list_of_molecules_current->atom_block_ids[0]).c_str());
+            AtomBlockId atom_id = list_of_molecules_current->atom_block_ids[0];
+            const t_model* model = atom_nlist.block_model(atom_id);
+            const char* primitive_type = model ? model->name : "<unknown>";
+            fprintf(fp, "\nmolecule type: atom (primitive: %s)\n", primitive_type);
+            fprintf(fp, "\tpattern index %d: atom block %s (ID: %zu)\n", i,
+                    atom_nlist.block_name(atom_id).c_str(),
+                    size_t(atom_id));
         } else if (list_of_molecules_current->type == MOLECULE_FORCED_PACK) {
             fprintf(fp, "\nmolecule type: %s\n",
                     list_of_molecules_current->pack_pattern->name);
@@ -2280,7 +2284,10 @@ static void update_chain_root_pins(t_pack_patterns* chain_pattern,
 
     for (const auto pin_ptr : chain_input_pins) {
         std::vector<t_pb_graph_pin*> connected_primitive_pins;
-        get_all_connected_primitive_pins(pin_ptr, connected_primitive_pins, chain_pattern->index);
+        // Find all primitive pins reachable from this CLB input pin.
+        // We keep ALL pins from ALL modes - the legalization check will verify
+        // against all of them using pb_graph_nodes_equivalent() which is mode-independent.
+        get_all_connected_primitive_pins(pin_ptr, connected_primitive_pins, chain_pattern->index, false);
 
         /**
          * It is required that the chain pins are connected inside a complex
@@ -2291,50 +2298,57 @@ static void update_chain_root_pins(t_pack_patterns* chain_pattern,
          */
         VTR_ASSERT(connected_primitive_pins.size());
 
-        // Deduplicate pins that represent equivalent positions across different modes.
-        // When multiple modes (e.g., arithmetic_1chain and arithmetic_2chains) have the
-        // same internal structure, get_all_connected_primitive_pins finds the same logical
-        // primitive through different mode paths. We keep only one representative by
-        // using the pin's string representation as a key.
-        std::set<std::string> seen_pins;
-        std::vector<t_pb_graph_pin*> unique_pins;
-        for (auto* pin : connected_primitive_pins) {
-            std::string pin_str = pin->to_string();
-            if (seen_pins.find(pin_str) == seen_pins.end()) {
-                seen_pins.insert(pin_str);
-                unique_pins.push_back(pin);
-            }
-        }
-
-        primitive_input_pins.push_back(unique_pins);
+        // Keep all pins - don't deduplicate.
+        // Different modes may have pins at the same logical position but different
+        // mode paths. During legalization, we check against ALL stored pins using
+        // pb_graph_nodes_equivalent() which compares by pb_type name and placement
+        // index (mode-independent), so any matching mode will work.
+        primitive_input_pins.push_back(connected_primitive_pins);
     }
 
     chain_pattern->chain_root_pins = primitive_input_pins;
 }
 
 /**
- *  This function takes a pin as an input an does a depth first search on all the output edges
+ *  This function takes a pin as an input and does a depth first search on all the output edges
  *  of this pin till it finds all the primitive input pins connected to this pin. For example,
- *  if the input pin given to this function is the Cin pin of the cluster. This pin will return
+ *  if the input pin given to this function is the Cin pin of the cluster, this function will return
  *  the Cin pin of all the adder primitives connected to this pin. Which is for typical architectures
  *  will be only one pin connected to the very first adder in the cluster.
+ *
+ *  @param pin                      The pin to start the search from
+ *  @param connected_primitive_pins Output vector of found primitive pins
+ *  @param pattern_id               The pack pattern index to filter by
+ *  @param filter_by_pattern        If true, only follow edges belonging to the pattern.
+ *                                  This should be true at the CLB input level (where pattern
+ *                                  annotations exist) to select the correct mode, but false
+ *                                  at deeper levels where intermediate edges may lack annotations.
  */
-static void get_all_connected_primitive_pins(const t_pb_graph_pin* cluster_input_pin, std::vector<t_pb_graph_pin*>& connected_primitive_pins, int pattern_id) {
-    for (int iedge = 0; iedge < cluster_input_pin->num_output_edges; iedge++) {
-        const auto& output_edge = cluster_input_pin->output_edges[iedge];
-        // TODO: Enabling this filter causes failures with some architectures.
-        // The issue is that not all edges along the path have pattern annotations.
-        // if (!output_edge->belongs_to_pattern(pattern_id)) continue;
+static void get_all_connected_primitive_pins(const t_pb_graph_pin* pin,
+                                             std::vector<t_pb_graph_pin*>& connected_primitive_pins,
+                                             int pattern_id,
+                                             bool filter_by_pattern) {
+    for (int iedge = 0; iedge < pin->num_output_edges; iedge++) {
+        const auto& output_edge = pin->output_edges[iedge];
+
+        // At CLB input level, filter by pattern to select correct mode.
+        // At deeper levels, follow all edges since intermediate edges may lack annotations.
+        if (filter_by_pattern && !output_edge->belongs_to_pattern(pattern_id)) {
+            continue;
+        }
 
         for (int ipin = 0; ipin < output_edge->num_output_pins; ipin++) {
             if (output_edge->output_pins[ipin]->is_primitive_pin()) {
                 connected_primitive_pins.push_back(output_edge->output_pins[ipin]);
             } else {
-                get_all_connected_primitive_pins(output_edge->output_pins[ipin], connected_primitive_pins, pattern_id);
+                // Don't filter at deeper levels - intermediate edges may not have pattern annotations
+                get_all_connected_primitive_pins(output_edge->output_pins[ipin],
+                                                 connected_primitive_pins,
+                                                 pattern_id,
+                                                 false);
             }
         }
     }
-    VTR_ASSERT(connected_primitive_pins.size());
 }
 
 /**
