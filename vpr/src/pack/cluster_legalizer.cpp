@@ -20,7 +20,6 @@
 #include "atom_lookup.h"
 #include "atom_netlist.h"
 #include "cluster_placement.h"
-#include "cluster_profiler.h"
 #include "cluster_router.h"
 #include "cluster_util.h"
 #include "clustering_history_logger.h"
@@ -1687,9 +1686,6 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
 
         if (block_pack_status == e_block_pack_status::BLK_PASSED) {
             attempt_info += " -> placement PASSED";
-        } else {
-            // VTR_LOG("ClusterLegalizer::try_pack_molecule: BLK_FAILED_FEASIBLE\n");
-            CLUSTER_PROFILE_PLACEMENT_FAILURE();
         }
 
         if (enable_pin_feasibility_filter_ && block_pack_status == e_block_pack_status::BLK_PASSED) {
@@ -1770,7 +1766,6 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
             if (do_detailed_routing_stage && !is_routed) {
                 /* Cannot pack */
                 VTR_LOGV(log_verbosity_ > 4, "\t\t\tFAILED Detailed Routing Legality\n");
-                CLUSTER_PROFILE_ROUTING_FAILURE();
                 block_pack_status = e_block_pack_status::BLK_FAILED_ROUTE;
                 // Get detailed routing failure reason
                 std::string routing_failure_reason = describe_routing_failure(cluster.router_data, mode_status);

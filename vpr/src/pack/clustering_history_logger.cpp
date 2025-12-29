@@ -6,8 +6,10 @@
 #include "clustering_history_logger.h"
 
 #include <algorithm>
+#include <functional>
 #include <iomanip>
 #include <queue>
+#include <set>
 #include <sstream>
 
 #include "atom_netlist.h"
@@ -44,6 +46,14 @@ ClusteringHistoryLogger::ClusteringHistoryLogger() {
             }
         }
     }
+
+    // Check if echo is enabled for clustering profile (finalized CLB summary)
+    if (isEchoFileEnabled(E_ECHO_CLUSTERING_PROFILE)) {
+        const char* profile_filename = getEchoFileName(E_ECHO_CLUSTERING_PROFILE);
+        if (profile_filename) {
+            profile_file_.open(profile_filename);
+        }
+    }
 }
 
 ClusteringHistoryLogger::~ClusteringHistoryLogger() {
@@ -52,6 +62,9 @@ ClusteringHistoryLogger::~ClusteringHistoryLogger() {
         file_ << "                     END OF CLUSTERING HISTORY LOG\n";
         file_ << "================================================================================\n";
         file_.close();
+    }
+    if (profile_file_.is_open()) {
+        profile_file_.close();
     }
 }
 
@@ -717,4 +730,689 @@ void ClusteringHistoryLogger::log_routing_stats() {
 
     file_ << "\n";
     file_.flush();
+}
+
+// Helper function to collect atoms placed within a BLE5
+static void collect_ble5_atoms(const t_pb* pb,
+                               ClusteringHistoryLogger::Ble5Utilization& ble5_util) {
+    if (!pb || !pb->pb_graph_node) return;
+
+    // If this is a primitive with a name, it's a placed atom
+    if (pb->pb_graph_node->is_primitive() && pb->name) {
+        ble5_util.atoms.push_back(pb->name);
+        return;
+    }
+
+    // Recurse into children
+    if (pb->child_pbs) {
+        const t_pb_type* pb_type = pb->pb_graph_node->pb_type;
+        const t_mode* mode = &pb_type->modes[pb->mode];
+        for (int child_type = 0; child_type < mode->num_pb_type_children; child_type++) {
+            int num_children = mode->pb_type_children[child_type].num_pb;
+            for (int child_inst = 0; child_inst < num_children; child_inst++) {
+                const t_pb* child = &pb->child_pbs[child_type][child_inst];
+                if (child->name) {
+                    collect_ble5_atoms(child, ble5_util);
+                }
+            }
+        }
+    }
+}
+
+// Helper function to collect input pins for a specific pb node
+static void collect_pb_input_pins(const t_pb* pb, const t_pb* root_pb,
+                                  ClusteringHistoryLogger::PbNodeInfo& node_info) {
+    if (!pb || !pb->pb_graph_node || !root_pb) return;
+
+    const t_pb_graph_node* gnode = pb->pb_graph_node;
+    const auto& atom_ctx = g_vpr_ctx.atom();
+
+    // For primitives, check which input pins are used via atom netlist
+    if (gnode->is_primitive() && pb->name) {
+        AtomBlockId atom_id = atom_ctx.lookup.pb_atom(pb);
+        if (!atom_id.is_valid()) return;
+
+        for (int port = 0; port < gnode->num_input_ports; port++) {
+            const char* port_name = gnode->input_pins[port][0].port->name;
+            AtomPortId atom_port = atom_ctx.nlist.find_atom_port(
+                atom_id, gnode->input_pins[port][0].port->model_port);
+
+            for (int pin = 0; pin < gnode->num_input_pins[port]; pin++) {
+                std::string pin_name = std::string(port_name) + "[" + std::to_string(pin) + "]";
+                bool pin_used = false;
+                if (atom_port.is_valid()) {
+                    AtomPinId atom_pin = atom_ctx.nlist.port_pin(atom_port, pin);
+                    if (atom_pin.is_valid()) {
+                        AtomNetId net = atom_ctx.nlist.pin_net(atom_pin);
+                        pin_used = net.is_valid();
+                    }
+                }
+                if (pin_used) {
+                    node_info.input_pins[pin_name].push_back("used");
+                } else {
+                    node_info.input_pins[pin_name] = std::vector<std::string>();
+                }
+            }
+        }
+    } else {
+        // For non-primitives, check pb_route for which input pins have routing
+        for (int port = 0; port < gnode->num_input_ports; port++) {
+            const char* port_name = gnode->input_pins[port][0].port->name;
+            for (int pin = 0; pin < gnode->num_input_pins[port]; pin++) {
+                const t_pb_graph_pin* gpin = &gnode->input_pins[port][pin];
+                int pin_id = gpin->pin_count_in_cluster;
+                std::string pin_name = std::string(port_name) + "[" + std::to_string(pin) + "]";
+
+                bool pin_used = false;
+                if (root_pb->pb_route.count(pin_id)) {
+                    const auto& route = root_pb->pb_route.at(pin_id);
+                    pin_used = route.atom_net_id.is_valid() || (route.driver_pb_pin_id != OPEN);
+                }
+                if (pin_used) {
+                    node_info.input_pins[pin_name].push_back("routed");
+                } else {
+                    node_info.input_pins[pin_name] = std::vector<std::string>();
+                }
+            }
+        }
+    }
+}
+
+// Recursively collect the full pb hierarchy within a BLE5
+static ClusteringHistoryLogger::PbNodeInfo collect_pb_hierarchy(const t_pb* pb, const t_pb* root_pb) {
+    ClusteringHistoryLogger::PbNodeInfo node_info;
+    if (!pb || !pb->pb_graph_node) return node_info;
+
+    const t_pb_graph_node* gnode = pb->pb_graph_node;
+
+    // Set basic info
+    node_info.pb_type_name = gnode->pb_type->name;
+    node_info.pb_index = gnode->placement_index;
+    node_info.is_primitive = gnode->is_primitive();
+
+    if (node_info.is_primitive) {
+        node_info.atom_name = pb->name ? pb->name : "";
+        node_info.mode = "";  // Primitives don't have modes
+    } else {
+        node_info.atom_name = "";
+        if (pb->mode < gnode->pb_type->num_modes) {
+            node_info.mode = gnode->pb_type->modes[pb->mode].name;
+        } else {
+            node_info.mode = "<unknown>";
+        }
+    }
+
+    // Collect input pins for this level
+    collect_pb_input_pins(pb, root_pb, node_info);
+
+    // Recurse into children (skip for primitives)
+    if (!node_info.is_primitive && pb->child_pbs) {
+        const t_pb_type* pb_type = gnode->pb_type;
+        const t_mode* mode = &pb_type->modes[pb->mode];
+        for (int child_type = 0; child_type < mode->num_pb_type_children; child_type++) {
+            int num_children = mode->pb_type_children[child_type].num_pb;
+            for (int child_inst = 0; child_inst < num_children; child_inst++) {
+                const t_pb* child = &pb->child_pbs[child_type][child_inst];
+                if (child->name) {
+                    node_info.children.push_back(collect_pb_hierarchy(child, root_pb));
+                }
+            }
+        }
+    }
+
+    return node_info;
+}
+
+// Forward declaration for recursive tracing
+static void trace_primitive_to_ble5_inputs(const t_pb* pb, const t_pb* root_pb,
+                                           const std::set<int>& ble5_input_pin_ids,
+                                           const std::map<int, std::string>& pin_id_to_name,
+                                           ClusteringHistoryLogger::Ble5Utilization& ble5_util,
+                                           std::ofstream* debug_file);
+
+// Helper function to collect BLE5-level input pin usage
+// Traces from used primitive pins backward through pb_route to find which BLE5 inputs are used
+static void collect_ble5_input_pins(const t_pb* ble5_pb, const t_pb* root_pb,
+                                    ClusteringHistoryLogger::Ble5Utilization& ble5_util,
+                                    std::ofstream* debug_file = nullptr) {
+    if (!ble5_pb || !ble5_pb->pb_graph_node || !root_pb) return;
+
+    const t_pb_graph_node* ble5_gnode = ble5_pb->pb_graph_node;
+
+    // Build a set of BLE5 input pin IDs and a map to pin names
+    std::set<int> ble5_input_pin_ids;
+    std::map<int, std::string> pin_id_to_name;
+
+    for (int port = 0; port < ble5_gnode->num_input_ports; port++) {
+        const char* port_name = ble5_gnode->input_pins[port][0].port->name;
+        for (int pin = 0; pin < ble5_gnode->num_input_pins[port]; pin++) {
+            const t_pb_graph_pin* gpin = &ble5_gnode->input_pins[port][pin];
+            int pin_id = gpin->pin_count_in_cluster;
+            ble5_input_pin_ids.insert(pin_id);
+            std::string pin_name = std::string(port_name) + "[" + std::to_string(pin) + "]";
+            pin_id_to_name[pin_id] = pin_name;
+            // Initialize all with empty vector (unused)
+            ble5_util.input_pins[pin_name] = std::vector<std::string>();
+        }
+    }
+
+    // Trace from each used primitive pin backward to find which BLE5 inputs are used
+    trace_primitive_to_ble5_inputs(ble5_pb, root_pb, ble5_input_pin_ids, pin_id_to_name, ble5_util, debug_file);
+}
+
+// Recursively find primitives and trace their used pins back to BLE5 inputs
+// debug_file is optional - if provided, writes debug info
+static void trace_primitive_to_ble5_inputs(const t_pb* pb, const t_pb* root_pb,
+                                           const std::set<int>& ble5_input_pin_ids,
+                                           const std::map<int, std::string>& pin_id_to_name,
+                                           ClusteringHistoryLogger::Ble5Utilization& ble5_util,
+                                           std::ofstream* debug_file = nullptr) {
+    if (!pb || !pb->pb_graph_node) return;
+
+    // If this is a primitive, check its used input pins and trace back
+    if (pb->pb_graph_node->is_primitive() && pb->name) {
+        const auto& atom_ctx = g_vpr_ctx.atom();
+        AtomBlockId atom_id = atom_ctx.lookup.pb_atom(pb);
+        if (!atom_id.is_valid()) return;
+
+        const t_pb_graph_node* prim_gnode = pb->pb_graph_node;
+
+        if (debug_file && debug_file->is_open()) {
+            *debug_file << "      [DEBUG] Primitive: " << pb->name
+                        << " (type: " << prim_gnode->pb_type->name << ")\n";
+            *debug_file << "        pb_route size on root: " << root_pb->pb_route.size() << "\n";
+            *debug_file << "        BLE5 input pin IDs: ";
+            for (int id : ble5_input_pin_ids) *debug_file << id << " ";
+            *debug_file << "\n";
+        }
+
+        // Check each input port
+        for (int port = 0; port < prim_gnode->num_input_ports; port++) {
+            AtomPortId atom_port = atom_ctx.nlist.find_atom_port(
+                atom_id, prim_gnode->input_pins[port][0].port->model_port);
+
+            for (int pin = 0; pin < prim_gnode->num_input_pins[port]; pin++) {
+                bool pin_is_used = false;
+                if (atom_port.is_valid()) {
+                    AtomPinId atom_pin = atom_ctx.nlist.port_pin(atom_port, pin);
+                    if (atom_pin.is_valid()) {
+                        AtomNetId net = atom_ctx.nlist.pin_net(atom_pin);
+                        pin_is_used = net.is_valid();
+                    }
+                }
+
+                if (pin_is_used) {
+                    // This primitive pin is used - trace back through pb_route to find BLE5 input
+                    const t_pb_graph_pin* gpin = &prim_gnode->input_pins[port][pin];
+                    int current_pin_id = gpin->pin_count_in_cluster;
+
+                    if (debug_file && debug_file->is_open()) {
+                        *debug_file << "        Used pin: " << gpin->port->name << "[" << pin << "]"
+                                    << " pin_count_in_cluster=" << current_pin_id << "\n";
+                        *debug_file << "          Tracing: ";
+                    }
+
+                    // Trace backward through driver chain
+                    int max_iterations = 100;  // Safety limit
+                    bool found_ble5_input = false;
+                    for (int i = 0; i < max_iterations; i++) {
+                        if (debug_file && debug_file->is_open()) {
+                            *debug_file << current_pin_id;
+                        }
+
+                        // Check if current pin is a BLE5 input
+                        if (ble5_input_pin_ids.count(current_pin_id)) {
+                            // Record the atom name and which port/pin it drives
+                            std::string atom_with_pin = std::string(pb->name) + "." +
+                                std::string(gpin->port->name) + "[" + std::to_string(pin) + "]";
+                            ble5_util.input_pins[pin_id_to_name.at(current_pin_id)].push_back(atom_with_pin);
+                            found_ble5_input = true;
+                            if (debug_file && debug_file->is_open()) {
+                                *debug_file << " -> FOUND BLE5 input: " << pin_id_to_name.at(current_pin_id);
+                            }
+                            break;
+                        }
+
+                        // Look up driver in pb_route
+                        if (!root_pb->pb_route.count(current_pin_id)) {
+                            if (debug_file && debug_file->is_open()) {
+                                *debug_file << " -> NOT IN pb_route";
+                            }
+                            break;  // No routing info for this pin
+                        }
+
+                        const auto& route = root_pb->pb_route.at(current_pin_id);
+                        if (route.driver_pb_pin_id == OPEN) {
+                            if (debug_file && debug_file->is_open()) {
+                                *debug_file << " -> driver=OPEN (source)";
+                            }
+                            break;  // No driver (reached source)
+                        }
+
+                        if (debug_file && debug_file->is_open()) {
+                            *debug_file << " -> ";
+                        }
+                        current_pin_id = route.driver_pb_pin_id;
+                    }
+
+                    if (debug_file && debug_file->is_open()) {
+                        if (!found_ble5_input) {
+                            *debug_file << " [NOT FOUND]";
+                        }
+                        *debug_file << "\n";
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    // Recurse into children
+    if (pb->child_pbs) {
+        const t_pb_type* pb_type = pb->pb_graph_node->pb_type;
+        const t_mode* mode = &pb_type->modes[pb->mode];
+        for (int child_type = 0; child_type < mode->num_pb_type_children; child_type++) {
+            int num_children = mode->pb_type_children[child_type].num_pb;
+            for (int child_inst = 0; child_inst < num_children; child_inst++) {
+                const t_pb* child = &pb->child_pbs[child_type][child_inst];
+                if (child->name) {
+                    trace_primitive_to_ble5_inputs(child, root_pb, ble5_input_pin_ids,
+                                                   pin_id_to_name, ble5_util, debug_file);
+                }
+            }
+        }
+    }
+}
+
+// Helper function to recursively find BLE5 nodes and their pin usage
+static void collect_ble5_pin_usage(const t_pb* pb, const t_pb* root_pb,
+                                   std::map<int, ClusteringHistoryLogger::FleUtilization>& fle_map,
+                                   int current_fle_idx, const std::string& current_fle_mode,
+                                   std::ofstream* debug_file = nullptr) {
+    if (!pb || !pb->pb_graph_node) return;
+
+    const std::string pb_type_name = pb->pb_graph_node->pb_type->name;
+
+    // Check if this is a BLE5 node
+    if (pb_type_name.find("ble5") != std::string::npos || pb_type_name == "ble5") {
+        int ble5_idx = pb->pb_graph_node->placement_index;
+
+        // Get the mode of this BLE5
+        std::string ble5_mode = "<unknown>";
+        if (pb->mode < pb->pb_graph_node->pb_type->num_modes) {
+            ble5_mode = pb->pb_graph_node->pb_type->modes[pb->mode].name;
+        }
+
+        if (debug_file && debug_file->is_open()) {
+            *debug_file << "    [DEBUG] BLE5[" << ble5_idx << "] mode=" << ble5_mode << "\n";
+        }
+
+        // Create BLE5 utilization entry
+        ClusteringHistoryLogger::Ble5Utilization ble5_util;
+        ble5_util.ble5_index = ble5_idx;
+        ble5_util.ble5_mode = ble5_mode;
+
+        // Collect atoms placed within this BLE5
+        collect_ble5_atoms(pb, ble5_util);
+
+        // Collect BLE5-level input pin usage (not primitive pins)
+        collect_ble5_input_pins(pb, root_pb, ble5_util, debug_file);
+
+        // Collect full pb hierarchy within this BLE5
+        // We start from the children of BLE5, not BLE5 itself (since BLE5 info is already captured above)
+        if (pb->child_pbs) {
+            const t_pb_type* pb_type = pb->pb_graph_node->pb_type;
+            const t_mode* mode = &pb_type->modes[pb->mode];
+            for (int child_type = 0; child_type < mode->num_pb_type_children; child_type++) {
+                int num_children = mode->pb_type_children[child_type].num_pb;
+                for (int child_inst = 0; child_inst < num_children; child_inst++) {
+                    const t_pb* child = &pb->child_pbs[child_type][child_inst];
+                    if (child->name) {
+                        ble5_util.hierarchy.push_back(collect_pb_hierarchy(child, root_pb));
+                    }
+                }
+            }
+        }
+
+        // Add to FLE map
+        if (fle_map.find(current_fle_idx) != fle_map.end()) {
+            fle_map[current_fle_idx].ble5_usage[ble5_idx] = ble5_util;
+        }
+        return;  // Don't recurse further into BLE5 children
+    }
+
+    // Check if this is a FLE node
+    int fle_idx = current_fle_idx;
+    std::string fle_mode = current_fle_mode;
+    if (pb_type_name.find("fle") != std::string::npos || pb_type_name == "fle") {
+        fle_idx = pb->pb_graph_node->placement_index;
+        if (pb->mode < pb->pb_graph_node->pb_type->num_modes) {
+            fle_mode = pb->pb_graph_node->pb_type->modes[pb->mode].name;
+        }
+        // Create FLE entry if not exists
+        if (fle_map.find(fle_idx) == fle_map.end()) {
+            ClusteringHistoryLogger::FleUtilization fle_util;
+            fle_util.fle_index = fle_idx;
+            fle_util.fle_mode = fle_mode;
+            fle_map[fle_idx] = fle_util;
+        }
+    }
+
+    // Recurse into children
+    if (pb->child_pbs) {
+        const t_pb_type* pb_type = pb->pb_graph_node->pb_type;
+        const t_mode* mode = &pb_type->modes[pb->mode];
+        for (int child_type = 0; child_type < mode->num_pb_type_children; child_type++) {
+            int num_children = mode->pb_type_children[child_type].num_pb;
+            for (int child_inst = 0; child_inst < num_children; child_inst++) {
+                const t_pb* child = &pb->child_pbs[child_type][child_inst];
+                if (child->name) {  // Only process if child is used
+                    collect_ble5_pin_usage(child, root_pb, fle_map, fle_idx, fle_mode, debug_file);
+                }
+            }
+        }
+    }
+}
+
+void ClusteringHistoryLogger::record_finalized_clb(LegalizationClusterId cluster_id,
+                                                    const t_pb* cluster_pb,
+                                                    const std::vector<t_pack_molecule*>& molecules) {
+    FinalizedClbInfo info;
+    info.cluster_id = cluster_id;
+
+    if (cluster_pb) {
+        info.cluster_name = cluster_pb->name ? cluster_pb->name : "<unnamed>";
+        if (cluster_pb->pb_graph_node && cluster_pb->pb_graph_node->pb_type) {
+            info.cluster_type = cluster_pb->pb_graph_node->pb_type->name;
+        } else {
+            info.cluster_type = "<unknown>";
+        }
+    }
+
+    const auto& atom_ctx = g_vpr_ctx.atom();
+
+    // Record molecules with their atoms grouped (similar to log_clb_success format)
+    for (const auto* mol : molecules) {
+        if (!mol) continue;
+
+        MoleculeInfo mol_info;
+        mol_info.root_atom_name = get_atom_name(mol, mol->root);
+        mol_info.num_blocks = mol->num_blocks;
+        if (mol->pack_pattern && mol->pack_pattern->name) {
+            mol_info.pattern_name = mol->pack_pattern->name;
+        }
+
+        // Record atom placements within this molecule
+        int num_atoms = static_cast<int>(mol->atom_block_ids.size());
+        int limit = std::min(mol->num_blocks, num_atoms);
+        for (int i = 0; i < limit; i++) {
+            AtomBlockId atom_id = mol->atom_block_ids[i];
+            if (!atom_id.is_valid()) continue;
+
+            std::string atom_name = atom_ctx.nlist.block_name(atom_id);
+            const t_pb* atom_pb = atom_ctx.lookup.atom_pb(atom_id);
+            std::string placement = get_placement_description_with_mode(atom_pb);
+            mol_info.atom_placements.emplace_back(atom_name, placement);
+        }
+
+        info.molecules.push_back(std::move(mol_info));
+    }
+
+    // Traverse pb hierarchy to collect FLE/BLE5 utilization with pin usage
+    if (cluster_pb) {
+        collect_ble5_pin_usage(cluster_pb, cluster_pb, info.fle_utilization, -1, "", nullptr);
+    }
+
+    // Count total and used FLEs
+    info.total_fles = 10;  // Could be extracted from architecture
+    info.used_fles = static_cast<int>(info.fle_utilization.size());
+
+    finalized_clbs_.push_back(std::move(info));
+}
+
+// Helper function to recursively print pb hierarchy
+static void print_pb_hierarchy(std::ofstream& out,
+                               const std::vector<ClusteringHistoryLogger::PbNodeInfo>& nodes,
+                               int indent_level) {
+    std::string indent(indent_level * 2, ' ');
+
+    for (const auto& node : nodes) {
+        // Print node header
+        if (node.is_primitive) {
+            out << indent << node.pb_type_name << "[" << node.pb_index << "] (primitive)";
+            if (!node.atom_name.empty()) {
+                out << " atom=" << node.atom_name;
+            }
+            out << "\n";
+        } else {
+            out << indent << node.pb_type_name << "[" << node.pb_index << "]";
+            if (!node.mode.empty()) {
+                out << " mode=" << node.mode;
+            }
+            out << "\n";
+        }
+
+        // Print input pins for this node
+        if (!node.input_pins.empty()) {
+            out << indent << "  Pins:\n";
+            for (const auto& [pin_name, targets] : node.input_pins) {
+                if (targets.empty()) {
+                    out << indent << "    " << pin_name << " = 0\n";
+                } else {
+                    out << indent << "    " << pin_name << " = 1\n";
+                }
+            }
+        }
+
+        // Recurse into children
+        if (!node.children.empty()) {
+            print_pb_hierarchy(out, node.children, indent_level + 1);
+        }
+    }
+}
+
+// Convert FleActiveMode to string for output
+static std::string mode_to_string(FleActiveMode mode) {
+    switch (mode) {
+        case FleActiveMode::LUT5:
+            return "LUT5";
+        case FleActiveMode::SIMPLE_CHAIN:
+            return "simple_chain";
+        case FleActiveMode::CHAIN:
+            return "chain";
+        default:
+            return "unknown";
+    }
+}
+
+// Convert a multiset of active modes to a string like "{LUT5, LUT5, chain}"
+static std::string mode_set_to_string(const std::multiset<FleActiveMode>& modes) {
+    if (modes.empty()) {
+        return "{}";
+    }
+
+    std::string result = "{";
+    bool first = true;
+    // Output in priority order: LUT5, chain, simple_chain (with duplicates)
+    for (FleActiveMode m : {FleActiveMode::LUT5, FleActiveMode::CHAIN, FleActiveMode::SIMPLE_CHAIN}) {
+        size_t count = modes.count(m);
+        for (size_t i = 0; i < count; i++) {
+            if (!first) result += ", ";
+            result += mode_to_string(m);
+            first = false;
+        }
+    }
+    result += "}";
+    return result;
+}
+
+// Collect all active modes for a BLE5 into a multiset (preserves duplicates across BLE5s)
+static void collect_ble5_modes(const ClusteringHistoryLogger::Ble5Utilization& ble5,
+                                const std::map<std::string, std::string>& atom_to_pattern,
+                                std::multiset<FleActiveMode>& modes) {
+    if (ble5.atoms.empty()) {
+        return;
+    }
+
+    // Check BLE5 mode for LUT5
+    std::string mode_lower = ble5.ble5_mode;
+    std::transform(mode_lower.begin(), mode_lower.end(), mode_lower.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    if (mode_lower.find("lut") != std::string::npos ||
+        mode_lower.find("blut") != std::string::npos) {
+        modes.insert(FleActiveMode::LUT5);
+    }
+
+    // Check atom patterns from molecules - use a local set to avoid duplicates within same BLE5
+    bool has_simple_chain = false;
+    bool has_chain = false;
+    for (const auto& atom : ble5.atoms) {
+        auto it = atom_to_pattern.find(atom);
+        if (it != atom_to_pattern.end()) {
+            const std::string& pattern = it->second;
+            if (pattern == "simple_chain") {
+                has_simple_chain = true;
+            } else if (pattern.find("chain") != std::string::npos) {
+                has_chain = true;
+            }
+        }
+    }
+    if (has_simple_chain) {
+        modes.insert(FleActiveMode::SIMPLE_CHAIN);
+    }
+    if (has_chain) {
+        modes.insert(FleActiveMode::CHAIN);
+    }
+}
+
+void ClusteringHistoryLogger::write_summary() {
+    if (!profile_file_.is_open()) return;
+
+    profile_file_ << "================================================================================\n";
+    profile_file_ << "                     FINALIZED CLB SUMMARY\n";
+    profile_file_ << "================================================================================\n\n";
+
+    profile_file_ << "Total CLBs created: " << finalized_clbs_.size() << "\n\n";
+
+    for (const auto& clb : finalized_clbs_) {
+        profile_file_ << "--------------------------------------------------------------------------------\n";
+        profile_file_ << "CLB ID: " << size_t(clb.cluster_id) << " | Name: " << clb.cluster_name
+              << " | Type: " << clb.cluster_type << "\n";
+        profile_file_ << "--------------------------------------------------------------------------------\n";
+
+        // FLE utilization
+        double fle_util_percent = clb.total_fles > 0
+            ? (100.0 * clb.used_fles / clb.total_fles)
+            : 0.0;
+        profile_file_ << "  FLE UTILIZATION: " << clb.used_fles << " / " << clb.total_fles
+              << " (" << std::fixed << std::setprecision(1) << fle_util_percent << "%)\n\n";
+
+        // FLE breakdown with BLE5 details and pin usage
+        profile_file_ << "  FLE DETAILS:\n";
+        for (const auto& [fle_idx, fle_util] : clb.fle_utilization) {
+            profile_file_ << "    FLE[" << fle_idx << "] mode=" << fle_util.fle_mode << "\n";
+
+            for (const auto& [ble5_idx, ble5_util] : fle_util.ble5_usage) {
+                profile_file_ << "      BLE5[" << ble5_idx << "] mode=" << ble5_util.ble5_mode << "\n";
+
+                // Show atoms in this BLE5 (one per line)
+                if (!ble5_util.atoms.empty()) {
+                    profile_file_ << "        Atoms:\n";
+                    for (const auto& atom : ble5_util.atoms) {
+                        profile_file_ << "          - " << atom << "\n";
+                    }
+                }
+
+                // Show BLE5-level input pin usage
+                if (!ble5_util.input_pins.empty()) {
+                    profile_file_ << "        BLE5 Pins:\n";
+                    for (const auto& [pin_name, targets] : ble5_util.input_pins) {
+                        if (targets.empty()) {
+                            profile_file_ << "          " << pin_name << " = 0\n";
+                        } else {
+                            profile_file_ << "          " << pin_name << " = 1 (";
+                            for (size_t i = 0; i < targets.size(); i++) {
+                                if (i > 0) profile_file_ << ", ";
+                                profile_file_ << targets[i];
+                            }
+                            profile_file_ << ")\n";
+                        }
+                    }
+                }
+
+                // Show full hierarchy within BLE5
+                if (!ble5_util.hierarchy.empty()) {
+                    profile_file_ << "        Hierarchy:\n";
+                    print_pb_hierarchy(profile_file_, ble5_util.hierarchy, 5);
+                }
+            }
+        }
+
+        // Molecules with grouped atom placements (similar to clustering_history format)
+        profile_file_ << "\n  PACKED MOLECULES (" << clb.molecules.size() << "):\n";
+        for (size_t i = 0; i < clb.molecules.size(); i++) {
+            const auto& mol = clb.molecules[i];
+            profile_file_ << "    [" << i << "] Root: " << mol.root_atom_name;
+            if (!mol.pattern_name.empty()) {
+                profile_file_ << " (pattern: " << mol.pattern_name << ")";
+            }
+            profile_file_ << "\n";
+
+            // List atoms and their placements within this molecule
+            for (const auto& [atom, placement] : mol.atom_placements) {
+                profile_file_ << "        Atom: " << atom << " @ " << placement << "\n";
+            }
+        }
+
+        profile_file_ << "\n";
+    }
+
+    // ==================== FLE ACTIVITY SUMMARY ====================
+    // Build atom -> pattern map from all molecules across all CLBs
+    std::map<std::string, std::string> atom_to_pattern;
+    for (const auto& clb : finalized_clbs_) {
+        for (const auto& mol : clb.molecules) {
+            for (const auto& [atom_name, placement] : mol.atom_placements) {
+                atom_to_pattern[atom_name] = mol.pattern_name;
+            }
+        }
+    }
+
+    // Count FLE mode combinations across all CLBs
+    // Each FLE gets a multiset of active modes (preserves duplicates, e.g., {LUT5, LUT5})
+    std::map<std::multiset<FleActiveMode>, int> fle_counts;
+    for (const auto& clb : finalized_clbs_) {
+        for (const auto& [fle_idx, fle_util] : clb.fle_utilization) {
+            // Collect all active modes across all BLE5s in this FLE
+            std::multiset<FleActiveMode> fle_modes;
+            for (const auto& [ble5_idx, ble5_util] : fle_util.ble5_usage) {
+                collect_ble5_modes(ble5_util, atom_to_pattern, fle_modes);
+            }
+
+            // Only count FLEs that have at least one active mode
+            if (!fle_modes.empty()) {
+                fle_counts[fle_modes]++;
+            }
+        }
+    }
+
+    // Output FLE activity summary
+    profile_file_ << "================================================================================\n";
+    profile_file_ << "                     FLE ACTIVITY SUMMARY\n";
+    profile_file_ << "================================================================================\n\n";
+
+    // Sort by count (descending) for readability
+    std::vector<std::pair<std::multiset<FleActiveMode>, int>> sorted_counts(
+        fle_counts.begin(), fle_counts.end());
+    std::sort(sorted_counts.begin(), sorted_counts.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    int total_fles = 0;
+    for (const auto& [modes, count] : sorted_counts) {
+        profile_file_ << "  " << mode_set_to_string(modes) << ": " << count << "\n";
+        total_fles += count;
+    }
+    profile_file_ << "\n  Total FLEs: " << total_fles << "\n";
+
+    profile_file_.flush();
 }

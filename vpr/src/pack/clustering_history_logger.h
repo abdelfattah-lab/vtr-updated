@@ -23,6 +23,17 @@
 #include "atom_netlist_fwd.h"
 #include "cluster_legalizer.h"
 
+/**
+ * @brief Active mode categories for FLE utilization tracking.
+ *
+ * Each FLE can have multiple active modes simultaneously (e.g., LUT5 + chain).
+ */
+enum class FleActiveMode {
+    LUT5,          ///< LUT5 primitive is being used
+    SIMPLE_CHAIN,  ///< Atoms belong to a simple_chain molecule
+    CHAIN          ///< Atoms belong to a chain molecule (not simple_chain)
+};
+
 // Forward declarations
 class t_pack_molecule;
 struct t_pb;
@@ -40,6 +51,33 @@ struct t_lb_rr_node_stats;
  */
 class ClusteringHistoryLogger {
 public:
+    /// Recursive structure for pb hierarchy within a BLE5
+    struct PbNodeInfo {
+        std::string pb_type_name;  ///< Name of this pb_type (e.g., "ble5", "arithmetic_1chain", "adder")
+        int pb_index = -1;         ///< Index within parent
+        std::string mode;          ///< Mode selected (empty string for primitives)
+        bool is_primitive = false; ///< True if this is a primitive (leaf node)
+        std::string atom_name;     ///< For primitives, the atom placed here
+        std::map<std::string, std::vector<std::string>> input_pins;  ///< Pin name -> list of targets it drives
+        std::vector<PbNodeInfo> children;  ///< Child pb nodes
+    };
+
+    /// Information about a BLE5's pin utilization (now includes full hierarchy)
+    struct Ble5Utilization {
+        int ble5_index = -1;
+        std::string ble5_mode;  ///< Mode selected (e.g., "blut5", "arithmetic")
+        std::vector<std::string> atoms;  ///< Atoms placed in this BLE5 (flat list for quick reference)
+        std::map<std::string, std::vector<std::string>> input_pins;  ///< BLE5-level pin usage
+        std::vector<PbNodeInfo> hierarchy;  ///< Full pb hierarchy within this BLE5
+    };
+
+    /// Information about a FLE's BLE5 utilization
+    struct FleUtilization {
+        int fle_index = -1;
+        std::string fle_mode;  ///< Mode selected for this FLE (e.g., "n2_lut5", "arithmetic")
+        std::map<int, Ble5Utilization> ble5_usage;  ///< BLE5 index -> utilization
+    };
+
     /**
      * @brief Construct a new ClusteringHistoryLogger.
      *
@@ -57,10 +95,16 @@ public:
     ClusteringHistoryLogger& operator=(const ClusteringHistoryLogger&) = delete;
 
     /**
-     * @brief Check if logging is enabled.
-     * @return true if the echo file is enabled and open.
+     * @brief Check if history logging is enabled.
+     * @return true if the history echo file is enabled and open.
      */
     bool is_enabled() const { return file_.is_open(); }
+
+    /**
+     * @brief Check if profile logging is enabled.
+     * @return true if the profile echo file is enabled and open.
+     */
+    bool is_profile_enabled() const { return profile_file_.is_open(); }
 
     /**
      * @brief Log the start of a new packing iteration.
@@ -227,9 +271,56 @@ public:
      */
     void log_routing_stats();
 
+    /**
+     * @brief Record a finalized CLB for the end-of-clustering summary.
+     *
+     * This stores CLB information including molecules, atom placements, and
+     * pin utilization for output in the final summary.
+     *
+     * @param cluster_id    The ID of the finalized cluster.
+     * @param cluster_pb    The pb structure of the cluster.
+     * @param molecules     The molecules packed into the cluster.
+     */
+    void record_finalized_clb(LegalizationClusterId cluster_id,
+                              const t_pb* cluster_pb,
+                              const std::vector<t_pack_molecule*>& molecules);
+
+    /**
+     * @brief Write the final summary of all finalized CLBs.
+     *
+     * Call this at the end of clustering to output a summary showing all
+     * CLBs with their molecules, atom placements, and pin utilization.
+     */
+    void write_summary();
+
 private:
-    /// The output file stream
+    /// Information about a molecule and its atom placements
+    struct MoleculeInfo {
+        std::string root_atom_name;   ///< Name of the root atom
+        std::string pattern_name;     ///< Pack pattern name (empty if single atom)
+        int num_blocks = 0;           ///< Number of blocks in molecule
+        std::vector<std::pair<std::string, std::string>> atom_placements;  ///< (atom_name, placement_path)
+    };
+
+    /// Information about a finalized CLB for the summary output
+    struct FinalizedClbInfo {
+        LegalizationClusterId cluster_id;
+        std::string cluster_name;
+        std::string cluster_type;
+        std::vector<MoleculeInfo> molecules;  ///< Molecules with their atoms grouped
+        std::map<int, FleUtilization> fle_utilization;  ///< FLE index -> utilization info
+        int total_fles = 0;
+        int used_fles = 0;
+    };
+
+    /// Storage for all finalized CLBs
+    std::vector<FinalizedClbInfo> finalized_clbs_;
+
+    /// The output file stream for history (real-time logging)
     std::ofstream file_;
+
+    /// The output file stream for profile (finalized CLB summary)
+    std::ofstream profile_file_;
 
     /// Timer for tracking CLB creation time
     std::chrono::high_resolution_clock::time_point clb_start_time_;

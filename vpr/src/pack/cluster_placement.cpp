@@ -19,7 +19,6 @@
 
 #include "cluster_placement.h"
 #include "cluster_legalizer.h"
-#include "cluster_profiler.h"
 #include "hash.h"
 #include "physical_types.h"
 #include "vpr_types.h"
@@ -252,14 +251,6 @@ bool get_next_primitive_list(t_intra_cluster_placement_stats* cluster_placement_
                     }
 
                     /* try place molecule at root location cur */
-                    CLUSTER_PROFILE_PRIMITIVE_CANDIDATE(molecule->is_chain());
-                    CLUSTER_PROFILE_PRIMITIVE_CANDIDATE_BY_TYPE(it->second->pb_graph_node->pb_type->name);
-                    // Track pattern location attempts for chain analysis
-                    if (molecule->pack_pattern != nullptr) {
-                        CLUSTER_PROFILE_PATTERN_LOCATION_ATTEMPT(
-                            molecule->pack_pattern->name,
-                            it->second->pb_graph_node->flat_site_index);
-                    }
                     cost = try_place_molecule(cluster_placement_stats,
                                               molecule,
                                               it->second->pb_graph_node,
@@ -506,8 +497,6 @@ static float try_place_molecule(t_intra_cluster_placement_stats* cluster_placeme
                                                            molecule->pack_pattern->root_block,
                                                            primitives_list,
                                                            &cost)) {
-                    CLUSTER_PROFILE_EXPANSION_FAILURE();
-                    CLUSTER_PROFILE_PATTERN_LOCATION_EXPAND_FAIL();
                     return HUGE_POSITIVE_FLOAT;
                 }
             }
