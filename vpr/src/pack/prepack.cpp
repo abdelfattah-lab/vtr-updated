@@ -873,10 +873,12 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
 
     t_pack_molecule* cur_molecule = list_of_molecules_head;
     while (cur_molecule != nullptr) {
-        if (cur_molecule->type == MOLECULE_FORCED_PACK && cur_molecule->pack_pattern->is_chain) {
+        if (cur_molecule->type == MOLECULE_FORCED_PACK && cur_molecule->pack_pattern->is_chain
+            && strcmp(cur_molecule->pack_pattern->name, "chain") == 0) {
             // Check if this is the double carry chain pattern we are interested in
             // We look for the specific indexing: Row 0 (0-19) and Row 1 (39-20)
             // We can check if the pattern has at least 40 blocks.
+            // Only process molecules from the "chain" pattern, not other chain patterns like "simple_chain"
             if (cur_molecule->num_blocks >= 40) {
                 for (int i = 0; i < 20; ++i) {
                     int row0_idx = i;
