@@ -2318,7 +2318,7 @@ module my_wrapper_divider(rst, clk, data_in_a, data_in_b, data_out);
 				start = 1;
 				Y = S4;
 			end
-			S4 : 
+			S4 :
 			begin
 				LA = 0;
 				EB = 0;
@@ -2331,6 +2331,13 @@ module my_wrapper_divider(rst, clk, data_in_a, data_in_b, data_out);
 				begin
 					Y = S4;
 				end
+			end
+			default:
+			begin
+				LA = 0;
+				EB = 0;
+				start = 0;
+				Y = S1;
 			end
 		endcase
 	end

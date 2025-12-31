@@ -3440,6 +3440,7 @@ always @(cust5_op or cust5_limm or a or b) begin
 				2'h1: result_cust5 = {a[31:16], b[7:0], a[7:0]};
 				2'h2: result_cust5 = {a[31:24], b[7:0], a[15:0]};
 				2'h3: result_cust5 = {b[7:0], a[23:0]};
+				default: result_cust5 = {a[31:8], b[7:0]};
 			endcase
 		end
 		5'h2 :
@@ -3973,6 +3974,7 @@ always @(spr_addr)
 		5'b11101: unqualified_cs = 32'b00100000000000000000000000000000;
 		5'b11110: unqualified_cs = 32'b01000000000000000000000000000000;
 		5'b11111: unqualified_cs = 32'b10000000000000000000000000000000;
+		default:  unqualified_cs = 32'b00000000000000000000000000000000;
 	endcase
 
 //
@@ -4599,7 +4601,7 @@ reg	[31:0]	spr_dat_o;	// SPR Read Data
 // Implementation of VR, UPR and configuration registers
 //
 always @(spr_addr)
-	if (~|spr_addr[31:4])
+	if (~|spr_addr[31:4]) begin
 
 		case(spr_addr[3:0])		// synopsys parallel_case
 			`OR1200_SPRGRP_SYS_VR: begin
@@ -4686,8 +4688,10 @@ always @(spr_addr)
 			end
 			default: spr_dat_o = 32'h00000000;
 		endcase
-		
-
+	
+	end else begin
+		spr_dat_o = 32'h00000000;
+	end
 
 //
 
@@ -4764,6 +4768,7 @@ always @(muxin_a or muxin_b or muxin_c or muxin_d or rfwb_op) begin
 		2'b11: begin
 			muxout = muxin_d + 32'b00000000000000000000000000001000;
 		end
+		default: muxout = 32'b00000000000000000000000000000000;
 	endcase
 end
 
@@ -5183,6 +5188,9 @@ always @(sel_byte3 or memdata) begin
 		`OR1200_M2R_EXTB3: begin
 				regdata_hh =  {{memdata[31]},{memdata[31]},{memdata[31]},{memdata[31]},{memdata[31]},{memdata[31]},{memdata[31]},{memdata[31]}};
 			end
+		default: begin
+				regdata_hh = 8'h00;
+			end
 	endcase
 end
 
@@ -5205,6 +5213,8 @@ always @(addr or memdata) begin
 			aligned = {memdata[15:0], 16'b0000000000000000};
 		2'b11:
 			aligned = {memdata[7:0], 24'b000000000000000000000000};
+		default:
+			aligned = memdata;
 	endcase
 end
 

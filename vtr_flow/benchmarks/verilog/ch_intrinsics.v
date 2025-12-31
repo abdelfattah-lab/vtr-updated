@@ -58,12 +58,20 @@ case(tag)
 		str_write_enable = memory_controller_write_enable;
 		str_in[8-1:0] = memory_controller_in[8-1:0];
 	end
+	default:
+	begin
+		str_address = 5'b0;
+		str_write_enable = 1'b0;
+		str_in[8-1:0] = 8'b0;
+	end
 endcase
 
 case(prevTag)
 
 	1'b0:
 		memory_controller_out = str_out;
+	default:
+		memory_controller_out = 32'b0;
 endcase
 end
 
@@ -285,6 +293,12 @@ begin
 		memory_controller_address = s_07;
 		memory_controller_write_enable = 1'b1;
 		memory_controller_in = c;
+	end
+	default:
+	begin
+		memory_controller_address = 32'b0;
+		memory_controller_write_enable = 1'b0;
+		memory_controller_in = 32'b0;
 	end
 	endcase
 end

@@ -249,6 +249,11 @@ module delay1x3 (datain, dataout, clk);
 
     always @(state or trigger or count)
     begin
+       // Default assignments to prevent latch inference
+       output_xhdl0 = 1'b0;
+       next_state = 0;
+       temp_count = count;
+
        case (state)
           0 :
                    begin
@@ -289,10 +294,16 @@ module delay1x3 (datain, dataout, clk);
                       begin
                          next_state = 2 ; 
 
-                      end 
+                      end
                    end
-       endcase 
-    end 
+         default :
+                   begin
+                      output_xhdl0 = 1'b0 ;
+                      next_state = 0 ;
+                      temp_count = 0 ;
+                   end
+       endcase
+    end
  endmodule
 
 module matmult (Ax, Ay, Az, m11, m12, m13, m21, m22, m23, m31, m32, m33, Cx, Cy, Cz, clk);
@@ -457,6 +468,23 @@ module rgconfigmemory (CfgAddr, CfgData, CfgData_Ready, want_CfgData, origx, ori
 
     always @(state or CfgData_Ready)
     begin
+       // Default assignments to prevent latch inference
+       want_CfgData = 1'b0;
+       next_state = 0;
+       temp_origx = origx;
+       temp_origy = origy;
+       temp_origz = origz;
+       temp_m11 = m11;
+       temp_m12 = m12;
+       temp_m13 = m13;
+       temp_m21 = m21;
+       temp_m22 = m22;
+       temp_m23 = m23;
+       temp_m31 = m31;
+       temp_m32 = m32;
+       temp_m33 = m33;
+       temp_bkcolour = bkcolour;
+
        case (state)
           0 :
                    begin
@@ -534,15 +562,19 @@ module rgconfigmemory (CfgAddr, CfgData, CfgData_Ready, want_CfgData, origx, ori
 
                       else
                       begin
-                         next_state = 1 ; 
-                      end 
+                         next_state = 1 ;
+                      end
                    end
-       endcase 
-    end 
+         default :
+                   begin
+                      want_CfgData = 1'b0 ;
+                      next_state = 0 ;
+                   end
+       endcase
+    end
  endmodule
 
-    
-    
+
  module spram21x4 (we, dataout, datain, clk);
 
     input we; 
@@ -710,12 +742,31 @@ waddress <= temp_waddress;
        end 
     end 
 
-    always @(state or addr_ready or data_ready or waddress or datain or wantDir or 
-             want_read or wantwriteback or writebackdata or writebackaddr or 
-             fcount or fbpage or faddress or fbnextscanline or triID or wantshadedata or 
+    always @(state or addr_ready or data_ready or waddress or datain or wantDir or
+             want_read or wantwriteback or writebackdata or writebackaddr or
+             fcount or fbpage or faddress or fbnextscanline or triID or wantshadedata or
              wanttexel or texeladdr)
 
     begin
+       // Default assignments to prevent latch inference
+       temp_waddress = waddress;
+       temp_faddress = faddress;
+       temp_fcount = fcount;
+       temp_fbdatavalidl = 1'b0;
+       temp_shadedataready = 1'b0;
+       temp_texelready = 1'b0;
+       tm3_sram_we = 8'b11111111;
+       tm3_sram_oe = 2'b01;
+       tm3_sram_adsp = 1'b0;
+       tm3_sram_data_xhdl0 = 0;
+       tm3_sram_addr = 0;
+       want_addr = 1'b0;
+       want_data = 1'b0;
+       read_ready = 1'b0;
+       dirReady = 1'b0;
+       writebackack = 1'b0;
+       next_state = 0;
+
        case (state)
 
           0 :
@@ -1019,22 +1070,33 @@ waddress <= temp_waddress;
                       tm3_sram_addr = {1'b0, texeladdr} ; 
                       next_state = 0 ; 
 
-				          temp_fbdatavalidl = 1'b0 ; 
-				          temp_shadedataready = 1'b0 ; 
-                         temp_texelready = 1'b1 ; 
+				          temp_fbdatavalidl = 1'b0 ;
+				          temp_shadedataready = 1'b0 ;
+                         temp_texelready = 1'b1 ;
                    end
-       endcase 
-    end 
+         default :
+                   begin
+                      tm3_sram_we = 8'b11111111 ;
+                      tm3_sram_oe = 2'b01 ;
+                      tm3_sram_adsp = 1'b0 ;
+                      tm3_sram_data_xhdl0 = 0;
+                      tm3_sram_addr = 0 ;
+                      want_addr = 1'b0 ;
+                      want_data = 1'b0 ;
+                      read_ready = 1'b0 ;
+                      dirReady = 1'b0 ;
+                      writebackack = 1'b0 ;
+                      next_state = 0 ;
+                      temp_fbdatavalidl = 1'b0 ;
+                      temp_shadedataready = 1'b0 ;
+                      temp_texelready = 1'b0 ;
+                   end
+       endcase
+    end
  endmodule
 
-    
-    
-    
-    
-    
-    
-    
-    
+
+
     
     
 
@@ -1100,6 +1162,14 @@ rgAddr <= temp_rgAddr;
 
     always @(state or ack or as or rgDone)
     begin
+       // Default assignments to prevent latch inference
+       next_state = 0;
+       statepeek = 3'b000;
+       temp_rgData = rgData;
+       temp_rgWE = rgWE;
+       temp_rgAddrValid = rgAddrValid;
+       temp_ack = ack;
+       temp_rgAddr = rgAddr;
 
        case (state)
           0 :
@@ -1246,21 +1316,26 @@ rgAddr <= temp_rgAddr;
                    end
            9 :
                    begin
-                      next_state = 5 ; 
+                      next_state = 5 ;
 
-                         temp_rgData = {16'b0000000000000000, dir[15:0]} ; 
-                          temp_rgWE = 3'b101 ; 
-                         temp_rgAddrValid = 1'b1 ; 
+                         temp_rgData = {16'b0000000000000000, dir[15:0]} ;
+                          temp_rgWE = 3'b101 ;
+                         temp_rgAddrValid = 1'b1 ;
                    end
-       endcase 
-    end 
+         default :
+                   begin
+                      next_state = 0 ;
+                      statepeek = 3'b000 ;
+                      temp_rgData = 0 ;
+                      temp_rgWE = 3'b000 ;
+                      temp_rgAddrValid = 1'b0 ;
+                      temp_ack = 1'b0 ;
+                      temp_rgAddr = 0 ;
+                   end
+       endcase
+    end
  endmodule
 
-    
-    
-    
-    
-    
 
  module raygencont (go, initcount, busyout, cycles, nextaddr, nas0, nas1, page, dirReady, wantDir, dirIn, addrIn, as, addr, ack, dir, raygroup0, raygroupvalid0, busy0, raygroup1, raygroupvalid1, busy1, globalreset, clk, statepeek);
 
@@ -1380,10 +1455,28 @@ rgAddr <= temp_rgAddr;
 
     always @(state or go or ack or busy or dirReady or addr or count or loaded)
     begin
+       // Default assignments to prevent latch inference
+       as = 1'b0;
+       wantDir = 1'b0;
+       next_state = 0;
+       statepeek = 3'b000;
+       temp_busyout = 1'b0;
+       temp_nas0 = 1'b0;
+       temp_nas1 = 1'b0;
+       temp_dir = dir;
+       temp_cycles = cycles;
+       temp_addr = addr[1:0];
+       temp_loaded = loaded;
+       temp_groupID = groupID;
+       temp_count = count;
+       temp_active = active;
+       temp_raygroupvalid0 = raygroupvalid0;
+       temp_raygroupvalid1 = raygroupvalid1;
+
        case (state)
           0 :
                    begin
-       				as = 1'b0 ; 
+       				as = 1'b0 ;
        				wantDir = 1'b0 ; 
                       if (go == 1'b1)
                       begin
@@ -1604,22 +1697,26 @@ rgAddr <= temp_rgAddr;
                                temp_active = 1'b0 ; 
                             end 
                          end 
-                         temp_loaded[0] = 1'b0 ; 
-                         temp_addr[1:0] = 2'b00 ; 
+                         temp_loaded[0] = 1'b0 ;
+                         temp_addr[1:0] = 2'b00 ;
 
 
-             temp_cycles = cycles + 1 ; 
+             temp_cycles = cycles + 1 ;
                    end
-       endcase 
-    end 
+         default :
+                   begin
+                      as = 1'b0 ;
+                      wantDir = 1'b0 ;
+                      next_state = 0 ;
+                      statepeek = 3'b000 ;
+                      temp_busyout = 1'b0 ;
+                      temp_nas0 = 1'b0 ;
+                      temp_nas1 = 1'b0 ;
+                   end
+       endcase
+    end
  endmodule
-    
-    
-    
-    
-    
-    
-    
+
 
  module resultrecieve (valid01, valid10, id01a, id01b, id01c, id10a, id10b, id10c, hit01a, hit01b, hit01c, hit10a, hit10b, hit10c, u01a, u01b, u01c, v01a, v01b, v01c, u10a, u10b, u10c, v10a, v10b, v10c, rgResultData, rgResultReady, rgResultSource, globalreset, clk);
 
@@ -1783,6 +1880,35 @@ hit10c <= temp_hit10c;
 
     always @(state or rgResultReady or rgResultSource)
     begin
+       // Default assignments to prevent latch inference
+       next_state = 0;
+       temp_valid01 = valid01;
+       temp_valid10 = valid10;
+       temp_id01a = id01a;
+       temp_id01b = id01b;
+       temp_id01c = id01c;
+       temp_id10a = id10a;
+       temp_id10b = id10b;
+       temp_id10c = id10c;
+       temp_hit01a = hit01a;
+       temp_hit01b = hit01b;
+       temp_hit01c = hit01c;
+       temp_hit10a = hit10a;
+       temp_hit10b = hit10b;
+       temp_hit10c = hit10c;
+       temp_u01a = u01a;
+       temp_u01b = u01b;
+       temp_u01c = u01c;
+       temp_v01a = v01a;
+       temp_v01b = v01b;
+       temp_v01c = v01c;
+       temp_u10a = u10a;
+       temp_u10b = u10b;
+       temp_u10c = u10c;
+       temp_v10a = v10a;
+       temp_v10b = v10b;
+       temp_v10c = v10c;
+
        case (state)
           0 :
                    begin
@@ -1878,32 +2004,25 @@ hit10c <= temp_hit10c;
                    end
           6 :
                    begin
-                      next_state = 0 ; 
+                      next_state = 0 ;
 
-      				temp_valid01 = 1'b0 ; 
-                         temp_v10a = rgResultData[23:16] ; 
-                         temp_v10b = rgResultData[15:8] ; 
-                         temp_v10c = rgResultData[7:0] ; 
-                         temp_valid10 = 1'b1 ; 
+      				temp_valid01 = 1'b0 ;
+                         temp_v10a = rgResultData[23:16] ;
+                         temp_v10b = rgResultData[15:8] ;
+                         temp_v10c = rgResultData[7:0] ;
+                         temp_valid10 = 1'b1 ;
 
                    end
-       endcase 
-    end 
+         default :
+                   begin
+                      next_state = 0 ;
+                      temp_valid01 = 1'b0 ;
+                      temp_valid10 = 1'b0 ;
+                   end
+       endcase
+    end
  endmodule
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+
 
  module resultwriter (valid01, valid10, id01a, id01b, id01c, id10a, id10b, id10c, hit01a, hit01b, hit01c, hit10a, hit10b, hit10c, u01a, u01b, u01c, v01a, v01b, v01c, u10a, u10b, u10c, v10a, v10b, v10c, addr, as01, as10, bkcolour, shadedata, triID, wantshadedata, shadedataready, texinfo, texaddr, texeladdr, texel, wanttexel, texelready, dataout, addrout, write, ack, globalreset, clk);
 
@@ -2119,14 +2238,33 @@ shadedatac <= temp_shadedatac;
     end 
     assign addrout = (process01 == 1'b1) ? addrout01 : addrout10 ;
 
-    always @(state or process01 or pending10 or ack or shadedataready or id01a or 
-             id01b or id01c or id10a or id10b or id10c or selectuv or hita or 
+    always @(state or process01 or pending10 or ack or shadedataready or id01a or
+             id01b or id01c or id10a or id10b or id10c or selectuv or hita or
              hitb or hitc or shadedata or pending01 or texmap or texelready)
     begin
+       // Default assignments to prevent latch inference
+       wantshadedata = 1'b0;
+       triID = 0;
+       selectuv = 0;
+       lmenable = 1'b0;
+       wanttexel = 1'b0;
+       next_state = 0;
+       temp_pending01 = pending01;
+       temp_pending10 = pending10;
+       temp_process01 = process01;
+       temp_shiften01 = 1'b0;
+       temp_shiften10 = 1'b0;
+       temp_write = 1'b0;
+       temp_shadedataa = shadedataa;
+       temp_shadedatab = shadedatab;
+       temp_shadedatac = shadedatac;
+       temp_texmap = texmap;
+       temp_texinfol = texinfol;
+
        case (state)
           0 :
                    begin
-				       wantshadedata = 1'b0 ; 
+				       wantshadedata = 1'b0 ;
    				       triID = 0;
 				       selectuv = 0;
 				       lmenable = 1'b0 ; 
@@ -2633,12 +2771,24 @@ shadedatac <= temp_shadedatac;
 						end
 					    temp_write = 1'b1;
                    end
-       endcase 
-    end 
+         default :
+                   begin
+                      wantshadedata = 1'b0 ;
+                      triID = 0;
+                      selectuv = 0;
+                      lmenable = 1'b0 ;
+                      wanttexel = 1'b0 ;
+                      next_state = 0 ;
+                      temp_shiften01 = 1'b0;
+                      temp_shiften10 = 1'b0;
+                      temp_write = 1'b0;
+                   end
+       endcase
+    end
  endmodule
  //////////////////////////////////////////////////////////////////////////////////////////////
  //
- // Verilog file generated by X-HDL - Revision 3.2.38  Jan. 9, 2004 
+ // Verilog file generated by X-HDL - Revision 3.2.38  Jan. 9, 2004
  // Sun Feb  8 14:14:35 2004
  //
  //      Input file         : G:/jamieson/VERILOG_BENCHMARKS/RAYTRACE/col16to21.vhd
@@ -2666,6 +2816,9 @@ shadedatac <= temp_shadedatac;
 
     always @(dataline or texelselect)
     begin
+       // Default assignment to prevent latch inference
+       col16 = 16'h0000;
+
        case (texelselect)
           2'b00 :
                    begin
@@ -2681,10 +2834,14 @@ shadedatac <= temp_shadedatac;
                    end
           2'b11 :
                    begin
-                      col16 = dataline[63:48] ; 
+                      col16 = dataline[63:48] ;
                    end
-       endcase 
-    end 
+          default :
+                   begin
+                      col16 = 16'h0000 ;
+                   end
+       endcase
+    end
     assign r = {col16[15:10], 1'b0} ;
     assign g = {col16[9:5], 2'b00} ;
     assign b = {col16[4:0], 2'b00} ;
@@ -2815,9 +2972,13 @@ shadedatac <= temp_shadedatac;
         reg[6:0] bvl; 
         reg[6:0] bwl; 
 
-        always @(selectuv or u01a or u01b or u01c or v01a or v01b or v01c or u10a or 
+        always @(selectuv or u01a or u01b or u01c or v01a or v01b or v01c or u10a or
                  u10b or u10c or v10a or v10b or v10c)
         begin
+           // Default assignment to prevent latch inference
+           u = 0;
+           v = 0;
+
            case (selectuv)
               3'b000 :
                        begin
