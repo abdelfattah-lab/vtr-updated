@@ -267,6 +267,9 @@ struct t_lb_router_data {
     /* current congestion factor */
     float pres_con_fac;
 
+    /* Description of last routing failure (populated before route trees are freed) */
+    std::string failure_description;
+
     t_lb_router_data() {
         lb_type_graph = nullptr;
         lb_rr_node_stats = nullptr;

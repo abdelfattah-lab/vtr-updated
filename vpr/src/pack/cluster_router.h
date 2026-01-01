@@ -37,4 +37,18 @@ void free_pb_route(t_pb_route* free_pb_route);
 std::string describe_routing_failure(const t_lb_router_data* router_data,
                                      const t_mode_selection_status& mode_status);
 
+/**
+ * @brief Generate a detailed description of why intra-logic block routing failed.
+ *
+ * This provides more detail than describe_routing_failure, including which
+ * specific nets are competing for congested nodes, and the source/sink pins
+ * of each net.
+ *
+ * @param router_data     The router data containing routing state
+ * @param mode_status     The mode selection status from the routing attempt
+ * @return A detailed human-readable description of the routing failure
+ */
+std::string describe_routing_failure_detailed(const t_lb_router_data* router_data,
+                                              const t_mode_selection_status& mode_status);
+
 #endif
