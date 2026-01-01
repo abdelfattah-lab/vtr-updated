@@ -850,6 +850,7 @@ static void backward_expand_pack_pattern_from_edge(const t_pb_graph_edge* expans
  * 2.  Forced pack molecules are groupings of atoms that matches a t_pack_pattern definition.
  * 3.  Chained molecules are molecules that follow a carry-chain style pattern,
  *     ie. a single linear chain that can be split across multiple complex blocks
+ * NOTE: this function is implemented specifically for the chain structure in DCC3.
  */
 static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
                                     const t_pack_patterns* list_of_pack_patterns,
@@ -862,13 +863,6 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
     AtomNetId gnd_net_id = atom_nlist.find_net("gnd");
     if (!gnd_net_id) {
         gnd_net_id = atom_nlist.create_net("gnd");
-        // We need a driver for this net. Ideally a constant generator.
-        // For now, we assume if it didn't exist, we might need to create a dummy driver or leave it undriven (which might be an error).
-        // However, usually 'gnd' exists if used in the design.
-        // If we create it, we should probably make it a constant.
-        // Let's try to find a constant zero block/pin if possible, or just create the net and hope the router handles it (or legalizer).
-        // A safer bet is to look for any net that is a constant 0.
-        // But for this specific task, let's assume "gnd" is the standard name.
     }
 
     t_pack_molecule* cur_molecule = list_of_molecules_head;
@@ -1061,7 +1055,6 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
 
                         // 3. Update Molecule
                         cur_molecule->atom_block_ids[row1_idx] = new_blk_id;
-                        cur_molecule->num_blocks++; // Increment block count
 
                         // 4. Register in atom_molecules
                         atom_molecules.insert({new_blk_id, cur_molecule});
@@ -1231,7 +1224,8 @@ static void fill_vacant_chain_spots(t_pack_molecule* list_of_molecules_head,
 
                         // 3. Update Molecule
                         cur_molecule->atom_block_ids[row0_idx] = new_blk_id;
-                        cur_molecule->num_blocks++; // Increment block count
+                        // Note: Do NOT increment num_blocks - we're filling an existing
+                        // vacant slot in the pattern, not adding a new one
 
                         // 4. Register in atom_molecules
                         atom_molecules.insert({new_blk_id, cur_molecule});
@@ -1839,6 +1833,9 @@ static void print_pack_molecules(const char* fname,
         } else if (list_of_molecules_current->type == MOLECULE_FORCED_PACK) {
             fprintf(fp, "\nmolecule type: %s\n",
                     list_of_molecules_current->pack_pattern->name);
+            fprintf(fp, "\tmolecule num_blocks: %d (pattern num_blocks: %d)\n",
+                    list_of_molecules_current->num_blocks,
+                    list_of_molecules_current->pack_pattern->num_blocks);
             if (list_of_molecules_current->is_chain()) {
                 fprintf(fp, "\tis_long_chain: %d\n", list_of_molecules_current->chain_info->is_long_chain);
                 fprintf(fp, "\tchain_id: %d\n", list_of_molecules_current->chain_info->chain_id);
@@ -2838,8 +2835,7 @@ static int determine_upstream_exit_chain_id(const t_pack_molecule* molecule,
     // When patterns are the same (or have the same structure), the exit is determined
     // by which row the first molecule is placed in (chain_id), not by pattern structure.
     // The downstream molecule will inherit via shared chain_info->chain_id.
-    if (molecule->pack_pattern == prev_molecule->pack_pattern ||
-        molecule->pack_pattern->chain_root_pins.size() == prev_molecule->pack_pattern->chain_root_pins.size()) {
+    if (molecule->pack_pattern == prev_molecule->pack_pattern || molecule->pack_pattern->chain_root_pins.size() == prev_molecule->pack_pattern->chain_root_pins.size()) {
         return -1;
     }
 
@@ -2857,8 +2853,7 @@ static int determine_upstream_exit_chain_id(const t_pack_molecule* molecule,
             if (pin.port->model_port == cout_model) {
                 // Found the cout pin - match against exit_pins
                 for (size_t exit_id = 0; exit_id < exit_pins.size(); exit_id++) {
-                    if (pin.parent_node->placement_index ==
-                        exit_pins[exit_id]->parent_node->placement_index) {
+                    if (pin.parent_node->placement_index == exit_pins[exit_id]->parent_node->placement_index) {
                         return static_cast<int>(exit_id);
                     }
                 }
