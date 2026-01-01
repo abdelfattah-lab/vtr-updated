@@ -168,6 +168,24 @@ public:
                              int molecule_size);
 
     /**
+     * @brief Log detailed routing paths for all nets in a failed routing attempt.
+     *
+     * For each net, this traces the routing tree from source to sinks,
+     * showing which RR nodes (pins) are used. This helps debug routing
+     * congestion by showing exactly how signals are routed through the CLB.
+     *
+     * Format for each net:
+     *   NET: <net_name>
+     *     source: <atom_pin> @ <pb_pin>
+     *       -> <intermediate_pin>
+     *       -> <intermediate_pin>
+     *       -> sink: <atom_pin> @ <pb_pin>
+     *
+     * @param router_data  The router data containing nets and routing trees.
+     */
+    void log_routing_paths(const t_lb_router_data* router_data);
+
+    /**
      * @brief Log successful CLB finalization.
      *
      * @param cluster_id    The ID of the finalized cluster.
@@ -289,6 +307,11 @@ public:
      * @brief Set the current routing source for subsequent routing attempts.
      */
     void set_routing_source(RoutingSource source) { current_routing_source_ = source; }
+
+    /**
+     * @brief Get the current routing source.
+     */
+    RoutingSource get_routing_source() const { return current_routing_source_; }
 
     /**
      * @brief Set the current molecule type being routed.

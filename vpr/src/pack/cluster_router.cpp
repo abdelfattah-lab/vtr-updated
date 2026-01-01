@@ -12,8 +12,11 @@
  * Date: July 22, 2013
  */
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <set>
 #include <vector>
 #include <map>
 #include <queue>
@@ -1682,6 +1685,219 @@ static std::string build_routing_failure_description(const t_lb_router_data* rou
             }
             description += "] ";
             count++;
+        }
+
+        // Add detailed routing paths for nets using congested nodes
+        if (router_data->intra_lb_nets) {
+            const auto& lb_nets = *router_data->intra_lb_nets;
+            const auto& atom_ctx = g_vpr_ctx.atom();
+            std::set<int> congested_set(congested_rr_nodes.begin(), congested_rr_nodes.end());
+
+            description += "\n\n    Nets using congested nodes:\n";
+
+            for (size_t inet = 0; inet < lb_nets.size(); inet++) {
+                const auto& lb_net = lb_nets[inet];
+                if (!lb_net.rt_tree) continue;
+
+                // Check if this net's route tree uses any congested node
+                std::queue<const t_lb_trace*> q;
+                q.push(lb_net.rt_tree);
+                bool uses_congested = false;
+
+                while (!q.empty() && !uses_congested) {
+                    const t_lb_trace* curr = q.front();
+                    q.pop();
+                    if (congested_set.count(curr->current_node)) {
+                        uses_congested = true;
+                    }
+                    for (const auto& next : curr->next_nodes) {
+                        q.push(&next);
+                    }
+                }
+
+                if (!uses_congested) continue;
+
+                // Get net name
+                std::string net_name = "<unknown>";
+                if (lb_net.atom_net_id.is_valid()) {
+                    net_name = atom_ctx.nlist.net_name(lb_net.atom_net_id);
+                }
+
+                description += "      NET: " + net_name + "\n";
+
+                // Trace the route tree, marking congested nodes
+                std::function<void(const t_lb_trace*, std::vector<std::string>&)> trace_tree;
+                trace_tree = [&](const t_lb_trace* node, std::vector<std::string>& path) {
+                    int rr_node_idx = node->current_node;
+                    std::string node_str;
+
+                    if (lb_type_graph[rr_node_idx].pb_graph_pin) {
+                        node_str = lb_type_graph[rr_node_idx].pb_graph_pin->to_string(false);
+                    } else {
+                        node_str = "node" + std::to_string(rr_node_idx);
+                    }
+
+                    if (congested_set.count(rr_node_idx)) {
+                        node_str = "***" + node_str + "***";
+                    }
+
+                    path.push_back(node_str);
+
+                    if (node->next_nodes.empty()) {
+                        // Leaf - print the path
+                        description += "        PATH: ";
+                        for (size_t i = 0; i < path.size(); i++) {
+                            if (i > 0) description += " -> ";
+                            description += path[i];
+                        }
+                        description += "\n";
+                    } else {
+                        for (const auto& next : node->next_nodes) {
+                            trace_tree(&next, path);
+                        }
+                    }
+
+                    path.pop_back();
+                };
+
+                std::vector<std::string> path;
+                trace_tree(lb_net.rt_tree, path);
+            }
+
+            // Add compact listing of ALL nets using LAB input pins (I1, I2, I3, I4)
+            description += "\n    All nets through LAB inputs (I1/I2/I3/I4):\n";
+
+            // Collect all entries for sorting
+            struct LabInputEntry {
+                int port_num;    // 1, 2, 3, or 4
+                int pin_index;   // the [N] index
+                std::string line;
+            };
+            std::vector<LabInputEntry> entries;
+
+            for (size_t inet = 0; inet < lb_nets.size(); inet++) {
+                const auto& lb_net = lb_nets[inet];
+                if (!lb_net.rt_tree) continue;
+
+                // Check if this net uses any lab[0].I1/I2/I3/I4 pin
+                std::queue<const t_lb_trace*> q;
+                q.push(lb_net.rt_tree);
+                std::string lab_input_pin;
+                bool found_lab_input = false;
+                int port_num = 0, pin_index = 0;
+
+                while (!q.empty() && !found_lab_input) {
+                    const t_lb_trace* curr = q.front();
+                    q.pop();
+                    int node_idx = curr->current_node;
+                    if (lb_type_graph[node_idx].pb_graph_pin) {
+                        std::string pin_str = lb_type_graph[node_idx].pb_graph_pin->to_string(false);
+                        // Check if it's a lab[0].I1, I2, I3, or I4 pin and extract indices
+                        for (int p = 1; p <= 4; p++) {
+                            std::string prefix = "lab[0].I" + std::to_string(p) + "[";
+                            size_t pos = pin_str.find(prefix);
+                            if (pos != std::string::npos) {
+                                lab_input_pin = pin_str;
+                                port_num = p;
+                                // Extract pin index
+                                size_t start = pos + prefix.length();
+                                size_t end = pin_str.find(']', start);
+                                if (end != std::string::npos) {
+                                    pin_index = std::stoi(pin_str.substr(start, end - start));
+                                }
+                                found_lab_input = true;
+                                break;
+                            }
+                        }
+                    }
+                    for (const auto& next : curr->next_nodes) {
+                        q.push(&next);
+                    }
+                }
+
+                if (!found_lab_input) continue;
+
+                // Get net name
+                std::string net_name = "<unknown>";
+                if (lb_net.atom_net_id.is_valid()) {
+                    net_name = atom_ctx.nlist.net_name(lb_net.atom_net_id);
+                }
+
+                // Build compact one-line path: source -> LAB_input -> sink
+                std::string source_str, sink_str;
+
+                // Source is first node
+                int src_node = lb_net.rt_tree->current_node;
+                if (lb_type_graph[src_node].pb_graph_pin) {
+                    source_str = lb_type_graph[src_node].pb_graph_pin->to_string(false);
+                } else {
+                    source_str = "node" + std::to_string(src_node);
+                }
+
+                // Find sink - get the last meaningful primitive pin (before final SINK node)
+                std::function<std::string(const t_lb_trace*, std::string)> find_sink;
+                find_sink = [&](const t_lb_trace* node, std::string last_pin) -> std::string {
+                    int idx = node->current_node;
+                    std::string current_pin = last_pin;
+
+                    if (lb_type_graph[idx].pb_graph_pin) {
+                        std::string pin_str = lb_type_graph[idx].pb_graph_pin->to_string(false);
+                        // Keep track of primitive-level pins (adder, lut, etc.)
+                        if (pin_str.find("adder[") != std::string::npos ||
+                            pin_str.find("lut") != std::string::npos ||
+                            pin_str.find("latch") != std::string::npos ||
+                            pin_str.find("ff[") != std::string::npos) {
+                            current_pin = pin_str;
+                        }
+                    }
+
+                    if (node->next_nodes.empty()) {
+                        return current_pin.empty() ? "node" + std::to_string(idx) : current_pin;
+                    }
+                    return find_sink(&node->next_nodes[0], current_pin);
+                };
+                sink_str = find_sink(lb_net.rt_tree, "");
+
+                // Try to get atom name for the sink (from atom_pins if available)
+                // atom_pins[0] is source, atom_pins[1+] are sinks
+                if (lb_net.atom_pins.size() > 1 && lb_net.atom_pins[1].is_valid()) {
+                    AtomPinId sink_pin = lb_net.atom_pins[1];
+                    AtomBlockId sink_blk = atom_ctx.nlist.pin_block(sink_pin);
+                    if (sink_blk.is_valid()) {
+                        std::string atom_name = atom_ctx.nlist.block_name(sink_blk);
+                        // Truncate long names
+                        if (atom_name.length() > 30) {
+                            atom_name = atom_name.substr(0, 27) + "...";
+                        }
+                        sink_str += " (" + atom_name + ")";
+                    }
+                }
+
+                // Mark if congested
+                std::string marker = "";
+                for (int cnode : congested_rr_nodes) {
+                    if (lb_type_graph[cnode].pb_graph_pin) {
+                        std::string cpin = lb_type_graph[cnode].pb_graph_pin->to_string(false);
+                        if (cpin == lab_input_pin) {
+                            marker = " ***CONGESTED***";
+                            break;
+                        }
+                    }
+                }
+
+                entries.push_back({port_num, pin_index,
+                    "      " + net_name + ": " + source_str + " -> " + lab_input_pin + " -> " + sink_str + marker + "\n"});
+            }
+
+            // Sort by port number, then by pin index
+            std::sort(entries.begin(), entries.end(), [](const LabInputEntry& a, const LabInputEntry& b) {
+                if (a.port_num != b.port_num) return a.port_num < b.port_num;
+                return a.pin_index < b.pin_index;
+            });
+
+            for (const auto& entry : entries) {
+                description += entry.line;
+            }
         }
     } else if (!mode_status->is_mode_conflict) {
         description += "No valid routing path found (routing impossible).";
