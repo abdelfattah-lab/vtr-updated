@@ -388,7 +388,164 @@ void ClusteringHistoryLogger::log_routing_failure(const t_pack_molecule* molecul
     // Log congestion details
     file_ << "\n    CONGESTION ANALYSIS:\n";
     file_ << describe_congestion(router_data);
+
+    // Note: Detailed routing paths are not available here because trees are freed
+    // after routing failure. The failure_description in router_data contains
+    // congestion info captured before cleanup.
+
     file_ << "\n";
+    file_.flush();
+}
+
+void ClusteringHistoryLogger::log_routing_paths(const t_lb_router_data* router_data) {
+    if (!file_.is_open()) return;
+
+    file_ << "\n  ======== DETAILED ROUTING PATHS ========\n";
+
+    if (!router_data || !router_data->lb_type_graph || !router_data->intra_lb_nets) {
+        file_ << "    <No routing data available>\n";
+        return;
+    }
+
+    const auto& atom_ctx = g_vpr_ctx.atom();
+    const auto& lb_type_graph = *router_data->lb_type_graph;
+    const auto& lb_nets = *router_data->intra_lb_nets;
+    const auto* lb_rr_node_stats = router_data->lb_rr_node_stats;
+    t_logical_block_type_ptr lb_type = router_data->lb_type;
+
+    // Find congested nodes for highlighting
+    std::set<int> congested_nodes;
+    if (lb_rr_node_stats) {
+        for (size_t inode = 0; inode < lb_type_graph.size(); ++inode) {
+            if (lb_rr_node_stats[inode].occ > lb_type_graph[inode].capacity) {
+                congested_nodes.insert(inode);
+            }
+        }
+    }
+
+    // Helper to get pin name from RR node
+    auto get_node_name = [&](int inode) -> std::string {
+        if (inode < 0 || static_cast<size_t>(inode) >= lb_type_graph.size()) {
+            return "<invalid>";
+        }
+        const t_lb_type_rr_node& rr_node = lb_type_graph[inode];
+        if (rr_node.pb_graph_pin) {
+            return rr_node.pb_graph_pin->to_string(false);
+        } else if (lb_type && inode == get_lb_type_rr_graph_ext_source_index(lb_type)) {
+            return "EXT_SOURCE";
+        } else if (lb_type && inode == get_lb_type_rr_graph_ext_sink_index(lb_type)) {
+            return "EXT_SINK";
+        } else {
+            switch (rr_node.type) {
+                case LB_SOURCE: return "SOURCE";
+                case LB_SINK: return "SINK";
+                case LB_INTERMEDIATE: return "INTERMEDIATE";
+                default: return "UNKNOWN";
+            }
+        }
+    };
+
+    // Helper to check if a node is congested
+    auto is_congested = [&](int inode) -> bool {
+        return congested_nodes.count(inode) > 0;
+    };
+
+    // Recursive function to trace and print route tree
+    std::function<void(const t_lb_trace*, int, std::vector<std::string>&)> trace_route;
+    trace_route = [&](const t_lb_trace* trace, int depth, std::vector<std::string>& path) {
+        if (!trace) return;
+
+        int inode = trace->current_node;
+        std::string node_name = get_node_name(inode);
+
+        // Mark congested nodes with ***
+        if (is_congested(inode)) {
+            node_name = "***" + node_name + "*** (CONGESTED)";
+        }
+
+        path.push_back(node_name);
+
+        if (trace->next_nodes.empty()) {
+            // This is a sink - print the complete path
+            file_ << "      PATH: ";
+            for (size_t i = 0; i < path.size(); ++i) {
+                if (i > 0) file_ << " -> ";
+                file_ << path[i];
+            }
+            file_ << "\n";
+        } else {
+            // Continue tracing to children
+            for (const auto& next : trace->next_nodes) {
+                trace_route(&next, depth + 1, path);
+            }
+        }
+
+        path.pop_back();
+    };
+
+    file_ << "    (Paths marked with *** indicate congested nodes)\n\n";
+
+    // Process each net
+    size_t net_count = 0;
+    for (size_t inet = 0; inet < lb_nets.size(); inet++) {
+        const auto& lb_net = lb_nets[inet];
+        if (!lb_net.rt_tree) continue;
+
+        // Get net name
+        std::string net_name;
+        if (lb_net.atom_net_id.is_valid()) {
+            net_name = atom_ctx.nlist.net_name(lb_net.atom_net_id);
+        } else {
+            net_name = "<unknown_net_" + std::to_string(inet) + ">";
+        }
+
+        // Get source and sink pin info
+        std::string source_info = "<unknown_source>";
+        std::vector<std::string> sink_infos;
+
+        for (size_t term = 0; term < lb_net.terminals.size(); term++) {
+            int term_rr_node = lb_net.terminals[term];
+            std::string term_pin_name = get_node_name(term_rr_node);
+
+            // Try to get atom pin info
+            std::string atom_pin_info;
+            if (term < lb_net.atom_pins.size() && lb_net.atom_pins[term].is_valid()) {
+                AtomPinId pin_id = lb_net.atom_pins[term];
+                AtomBlockId blk_id = atom_ctx.nlist.pin_block(pin_id);
+                AtomPortId port_id = atom_ctx.nlist.pin_port(pin_id);
+                int pin_index = atom_ctx.nlist.pin_port_bit(pin_id);
+                std::string blk_name = atom_ctx.nlist.block_name(blk_id);
+                std::string port_name = atom_ctx.nlist.port_name(port_id);
+                atom_pin_info = blk_name + "." + port_name + "[" + std::to_string(pin_index) + "]";
+            }
+
+            if (term == 0) {
+                // Source
+                source_info = atom_pin_info.empty() ? term_pin_name : atom_pin_info + " @ " + term_pin_name;
+            } else {
+                // Sink
+                std::string sink = atom_pin_info.empty() ? term_pin_name : atom_pin_info + " @ " + term_pin_name;
+                sink_infos.push_back(sink);
+            }
+        }
+
+        file_ << "    NET [" << net_count++ << "]: " << net_name << "\n";
+        file_ << "      Source: " << source_info << "\n";
+        for (size_t i = 0; i < sink_infos.size(); i++) {
+            file_ << "      Sink " << i << ": " << sink_infos[i] << "\n";
+        }
+
+        // Trace and print routing paths
+        std::vector<std::string> path;
+        trace_route(lb_net.rt_tree, 0, path);
+
+        file_ << "\n";
+    }
+
+    if (net_count == 0) {
+        file_ << "      <No routed nets found>\n";
+    }
+
     file_.flush();
 }
 
