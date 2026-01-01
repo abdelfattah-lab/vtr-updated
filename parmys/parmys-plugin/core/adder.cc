@@ -1056,6 +1056,40 @@ static bool is_adder_b_port_dff_only(nnode_t* adder)
 }
 
 /*-------------------------------------------------------------------------
+ * (function: get_a_port_sumout_driver_chain_head)
+ *
+ * If any pin in the adder's a port is driven by an adder's sumout,
+ * returns the chain head of that source adder. Otherwise returns NULL.
+ *-----------------------------------------------------------------------*/
+static nnode_t* get_a_port_sumout_driver_chain_head(nnode_t* adder)
+{
+    if (adder == NULL || adder->type != ADD)
+        return NULL;
+
+    int size_a = adder->input_port_sizes[0];
+
+    // Check each pin in port A for sumout connection
+    for (int i = 0; i < size_a; i++) {
+        npin_t* pin = adder->input_pins[i];
+        if (pin != NULL && pin->net != NULL && pin->net->num_driver_pins > 0) {
+            npin_t* driver_pin = pin->net->driver_pins[0];
+            if (driver_pin != NULL && driver_pin->node != NULL) {
+                nnode_t* driver = driver_pin->node;
+                if (driver->type == ADD) {
+                    // Check if driver pin is from sumout (not cout)
+                    int cout_size = driver->output_port_sizes[0];
+                    if (driver_pin->pin_node_idx >= cout_size) {
+                        // This is a sumout pin, find the chain head
+                        return find_chain_head(driver);
+                    }
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+/*-------------------------------------------------------------------------
  * (function: get_b_port_sumout_driver_chain_head)
  *
  * If any pin in the adder's b port is driven by an adder's sumout,
@@ -1135,6 +1169,41 @@ static std::vector<cascaded_adder_pair_t> detect_cascaded_adder_pairs(netlist_t*
 
         // If we found a connection and there are DFF-only positions before it
         if (source_head != NULL && first_connection_pos > 1) {
+            // Check if this is a compressor tree structure (e.g., from multiplication)
+            // where BOTH port A and port B receive sumout from the same source chain.
+            // In such cases, padding is not appropriate because the structure expects
+            // multiple sumout connections per adder, not same-tieOff single connections.
+            bool is_compressor_tree = false;
+            log("  Checking for compressor tree: target=%s, first_conn_pos=%d, target_length=%d\n",
+                target_head->name ? target_head->name : "NULL", first_connection_pos, target_length);
+            for (int pos = first_connection_pos; pos < target_length; pos++) {
+                nnode_t* target_adder = get_chain_adder_at_position(target_head, pos);
+                if (target_adder == NULL)
+                    break;
+
+                nnode_t* a_port_driver_head = get_a_port_sumout_driver_chain_head(target_adder);
+                nnode_t* b_port_driver_head = get_b_port_sumout_driver_chain_head(target_adder);
+
+                log("    pos=%d: a_head=%s, b_head=%s\n", pos,
+                    a_port_driver_head ? (a_port_driver_head->name ? a_port_driver_head->name : "unnamed") : "NULL",
+                    b_port_driver_head ? (b_port_driver_head->name ? b_port_driver_head->name : "unnamed") : "NULL");
+
+                // If both ports receive sumout from the same source chain, it's a compressor tree
+                if (a_port_driver_head != NULL && b_port_driver_head != NULL &&
+                    a_port_driver_head == b_port_driver_head) {
+                    is_compressor_tree = true;
+                    log("    -> Detected compressor tree at pos %d\n", pos);
+                    break;
+                }
+            }
+
+            if (is_compressor_tree) {
+                // Skip this chain - it's a compressor tree structure, not suitable for padding
+                log("  Skipping compressor tree chain: %s\n", target_head->name ? target_head->name : "NULL");
+                processed_targets.insert(target_head);
+                continue;
+            }
+
             // Verify positions 1 to (first_connection_pos - 1) are DFF-only
             bool all_dff_only = true;
             for (int pos = 1; pos < first_connection_pos; pos++) {

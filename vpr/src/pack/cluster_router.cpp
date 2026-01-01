@@ -120,6 +120,8 @@ static std::vector<int> find_congested_rr_nodes(const std::vector<t_lb_type_rr_n
 static std::vector<int> find_incoming_rr_nodes(int dst_node, const t_lb_router_data* router_data);
 static std::string describe_congested_rr_nodes(const std::vector<int>& congested_rr_nodes,
                                                const t_lb_router_data* router_data);
+static std::string build_routing_failure_description(const t_lb_router_data* router_data,
+                                                     t_mode_selection_status* mode_status);
 /*****************************************************************************************
  * Debug functions declarations
  ******************************************************************************************/
@@ -536,6 +538,9 @@ bool try_intra_lb_route(t_lb_router_data* router_data,
                 VTR_LOG("%s\n", describe_congested_rr_nodes(congested_rr_nodes, router_data).c_str());
             }
         }
+
+        // Store detailed failure description BEFORE cleaning up route trees
+        router_data->failure_description = build_routing_failure_description(router_data, mode_status);
 
         //Clean-up
         for (unsigned int inet = 0; inet < lb_nets.size(); inet++) {
@@ -1517,6 +1522,178 @@ static std::string describe_congested_rr_nodes(const std::vector<int>& congested
     return description;
 }
 
+/* Helper to describe a terminal node with full context */
+static std::string describe_terminal_node(int node_idx,
+                                          const std::vector<t_lb_type_rr_node>& lb_type_graph,
+                                          t_logical_block_type_ptr lb_type,
+                                          bool is_source) {
+    if (node_idx < 0 || node_idx >= (int)lb_type_graph.size()) {
+        return "<invalid node>";
+    }
+
+    const t_lb_type_rr_node& rr_node = lb_type_graph[node_idx];
+
+    // Check for external source/sink
+    if (node_idx == get_lb_type_rr_graph_ext_source_index(lb_type)) {
+        return "EXTERNAL_SOURCE (outside cluster)";
+    }
+    if (node_idx == get_lb_type_rr_graph_ext_sink_index(lb_type)) {
+        return "EXTERNAL_SINK (leaves cluster)";
+    }
+
+    // If the node has a pb_graph_pin, use it
+    if (rr_node.pb_graph_pin) {
+        return rr_node.pb_graph_pin->to_string(false);
+    }
+
+    // For sink nodes without pb_graph_pin, find what drives them
+    if (rr_node.type == LB_SINK) {
+        std::string desc = "SINK(node " + std::to_string(node_idx) + ", accessible via: ";
+        std::vector<std::string> pin_names;
+        // Find nodes that connect to this sink
+        for (size_t i = 0; i < lb_type_graph.size(); ++i) {
+            const t_lb_type_rr_node& src_node = lb_type_graph[i];
+            for (int mode = 0; mode < src_node.num_modes; mode++) {
+                for (int edge = 0; edge < src_node.num_fanout[mode]; edge++) {
+                    if (src_node.outedges[mode][edge].node_index == node_idx) {
+                        if (src_node.pb_graph_pin) {
+                            pin_names.push_back(src_node.pb_graph_pin->to_string(false));
+                        }
+                    }
+                }
+            }
+        }
+        if (!pin_names.empty()) {
+            for (size_t i = 0; i < pin_names.size() && i < 3; i++) {
+                if (i > 0) desc += ", ";
+                desc += pin_names[i];
+            }
+            if (pin_names.size() > 3) {
+                desc += ", ...+" + std::to_string(pin_names.size() - 3) + " more";
+            }
+        } else {
+            desc += "<unknown pins>";
+        }
+        desc += ")";
+        return desc;
+    }
+
+    if (rr_node.type == LB_SOURCE) {
+        return "SOURCE(node " + std::to_string(node_idx) + ")";
+    }
+
+    return "node " + std::to_string(node_idx) + " (type=" + lb_rr_type_str[(int)rr_node.type] + ")";
+}
+
+/* Helper to trace and describe the route path through a congested node */
+static std::string trace_route_through_node(int congested_node,
+                                            const t_lb_trace* rt_tree,
+                                            const std::vector<t_lb_type_rr_node>& lb_type_graph) {
+    if (!rt_tree) return "";
+
+    std::string path;
+    std::vector<int> route_to_congested;
+
+    // BFS to find path to congested node and what comes after
+    std::queue<std::pair<const t_lb_trace*, std::vector<int>>> q;
+    q.push({rt_tree, {rt_tree->current_node}});
+
+    while (!q.empty()) {
+        auto [curr, curr_path] = q.front();
+        q.pop();
+
+        if (curr->current_node == congested_node) {
+            route_to_congested = curr_path;
+            // Continue to find what comes after
+            for (const auto& next : curr->next_nodes) {
+                std::vector<int> extended_path = curr_path;
+                extended_path.push_back(next.current_node);
+                // Find terminal (leaf) of this branch
+                const t_lb_trace* leaf = &next;
+                while (!leaf->next_nodes.empty()) {
+                    extended_path.push_back(leaf->next_nodes[0].current_node);
+                    leaf = &leaf->next_nodes[0];
+                }
+
+                // Build path string
+                path = "      Route path: ";
+                for (size_t i = 0; i < extended_path.size(); i++) {
+                    if (i > 0) path += " -> ";
+                    int node = extended_path[i];
+                    if (node == congested_node) {
+                        path += "[CONGESTED:";
+                    }
+                    if (lb_type_graph[node].pb_graph_pin) {
+                        path += lb_type_graph[node].pb_graph_pin->to_string(false);
+                    } else {
+                        path += "node" + std::to_string(node);
+                    }
+                    if (node == congested_node) {
+                        path += "]";
+                    }
+                }
+                path += "\n";
+                return path;
+            }
+        }
+
+        for (const auto& next : curr->next_nodes) {
+            std::vector<int> new_path = curr_path;
+            new_path.push_back(next.current_node);
+            q.push({&next, new_path});
+        }
+    }
+
+    return path;
+}
+
+/* Build a description of routing failure, to be called BEFORE route trees are freed */
+static std::string build_routing_failure_description(const t_lb_router_data* router_data,
+                                                     t_mode_selection_status* mode_status) {
+    std::string description;
+
+    // Check for mode conflict
+    if (mode_status->is_mode_conflict) {
+        description += "Mode conflict detected. ";
+    }
+
+    // Find congested nodes
+    const auto& lb_type_graph = *router_data->lb_type_graph;
+    const auto& lb_rr_node_stats = router_data->lb_rr_node_stats;
+    auto congested_rr_nodes = find_congested_rr_nodes(lb_type_graph, lb_rr_node_stats);
+
+    if (!congested_rr_nodes.empty()) {
+        description += vtr::string_fmt("Congestion on %zu node(s): ", congested_rr_nodes.size());
+
+        // Describe first few congested nodes (just pin names and occupancy)
+        int count = 0;
+        for (int inode : congested_rr_nodes) {
+            if (count >= 3) {
+                description += "...";
+                break;
+            }
+            const t_lb_type_rr_node& rr_node = lb_type_graph[inode];
+            description += vtr::string_fmt("[node %d occ=%d/cap=%d",
+                                           inode,
+                                           lb_rr_node_stats[inode].occ,
+                                           rr_node.capacity);
+            if (rr_node.pb_graph_pin) {
+                description += " pin=" + rr_node.pb_graph_pin->to_string(false);
+            }
+            description += "] ";
+            count++;
+        }
+    } else if (!mode_status->is_mode_conflict) {
+        description += "No valid routing path found (routing impossible).";
+    }
+
+    if (description.empty()) {
+        description = "Unknown routing failure";
+    }
+
+    return description;
+}
+
 void reset_intra_lb_route(t_lb_router_data* router_data) {
     for (auto& node : *router_data->lb_type_graph) {
         auto* pin = node.pb_graph_pin;
@@ -1573,4 +1750,13 @@ std::string describe_routing_failure(const t_lb_router_data* router_data,
     }
 
     return description;
+}
+
+std::string describe_routing_failure_detailed(const t_lb_router_data* router_data,
+                                              const t_mode_selection_status& /* mode_status */) {
+    // Return the pre-computed failure description that was stored before route trees were freed
+    if (!router_data->failure_description.empty()) {
+        return router_data->failure_description;
+    }
+    return "Unknown routing failure (no description available)\n";
 }

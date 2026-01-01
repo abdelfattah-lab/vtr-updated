@@ -43,6 +43,16 @@ struct t_lb_type_rr_node;
 struct t_lb_rr_node_stats;
 
 /**
+ * @brief Information about a single primitive placement attempt.
+ *
+ * Used to track which placements were tried and why they failed.
+ */
+struct PlacementAttemptInfo {
+    std::string primitive_path;   ///< Hierarchical path to the primitive (e.g., "clb[0]/fle[0]/ble5[0]/lut5[0]")
+    std::string failure_reason;   ///< Why this placement failed (empty if not yet determined)
+};
+
+/**
  * @brief Logger for recording CLB creation history during clustering.
  *
  * This class provides methods to log detailed information about the clustering
@@ -198,12 +208,34 @@ public:
      * @param molecule              The molecule that failed to pack.
      * @param num_placements_tried  How many primitive placements were attempted.
      * @param last_failure_reason   Description of the last failure reason.
-     * @param all_placement_attempts  All placement attempts with their results.
+     */
+    void log_feasibility_failure(const t_pack_molecule* molecule,
+                                  int num_placements_tried,
+                                  const std::string& last_failure_reason);
+
+    /**
+     * @brief Log details about feasibility failure for a molecule with placement attempts.
+     *
+     * @param molecule              The molecule that failed to pack.
+     * @param num_placements_tried  How many primitive placements were attempted.
+     * @param last_failure_reason   Description of the last failure reason.
+     * @param placement_attempts    Details of each primitive placement attempted.
      */
     void log_feasibility_failure(const t_pack_molecule* molecule,
                                   int num_placements_tried,
                                   const std::string& last_failure_reason,
-                                  const std::vector<std::string>& all_placement_attempts);
+                                  const std::vector<PlacementAttemptInfo>& placement_attempts);
+
+    /**
+     * @brief Get primitive placement description (hierarchical path).
+     *
+     * Returns a string like "clb[0]/fle[0]/ble5[0]/lut5[0]" describing
+     * the location of a primitive in the pb_graph hierarchy.
+     *
+     * @param primitive  The pb_graph_node to describe.
+     * @return           Hierarchical path string.
+     */
+    std::string get_placement_description(t_pb_graph_node* primitive) const;
 
     /**
      * @brief Record a candidate molecule packing failure.
@@ -373,11 +405,6 @@ private:
      * @brief Get atom name from molecule at given index.
      */
     std::string get_atom_name(const t_pack_molecule* molecule, int index) const;
-
-    /**
-     * @brief Get primitive placement description (without mode info).
-     */
-    std::string get_placement_description(t_pb_graph_node* primitive) const;
 
     /**
      * @brief Get primitive placement description with mode information.

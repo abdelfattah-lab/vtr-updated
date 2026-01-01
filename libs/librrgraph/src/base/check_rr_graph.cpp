@@ -421,10 +421,7 @@ void check_rr_node(const RRGraphView& rr_graph,
             }
             if (xlow != xhigh || ylow != yhigh) {
                 VPR_FATAL_ERROR(VPR_ERROR_ROUTE,
-                                "in check_rr_node: node %d (type %d) has endpoints (%d,%d) and (%d,%d)\n"
-                                "  ptc_num: %d, tile_type: %s\n",
-                                inode, rr_type, xlow, ylow, xhigh, yhigh,
-                                ptc_num, type ? type->name.c_str() : "null");
+                                "in check_rr_node: node %d (type %d) has endpoints (%d,%d) and (%d,%d)\n", inode, rr_type, xlow, ylow, xhigh, yhigh);
             }
             break;
 

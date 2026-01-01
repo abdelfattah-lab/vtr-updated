@@ -29,6 +29,7 @@ class Prepacker;
 class t_intra_cluster_placement_stats;
 class t_pb_graph_node;
 struct t_lb_router_data;
+struct PlacementAttemptInfo;  // Forward declaration from clustering_history_logger.h
 
 /**
  * @brief Check if two pb_graph_nodes represent the same logical location.
@@ -606,7 +607,7 @@ private:
     struct MoleculeFailureInfo {
         int num_placements_tried = 0;
         std::string last_failure_reason = "Unknown";
-        std::vector<std::string> all_placement_attempts;
+        std::vector<PlacementAttemptInfo> placement_attempts;
     };
     mutable MoleculeFailureInfo last_molecule_failure_info_;
 };
