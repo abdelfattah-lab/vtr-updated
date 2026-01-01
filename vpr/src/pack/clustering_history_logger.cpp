@@ -1591,3 +1591,265 @@ void ClusteringHistoryLogger::write_summary() {
 
     profile_file_.flush();
 }
+
+// Helper function to get the hierarchical path of a pb
+static std::string get_pb_hierarchical_path(const t_pb* pb) {
+    if (!pb || !pb->pb_graph_node) return "<unknown>";
+
+    std::vector<std::string> path_parts;
+    const t_pb* curr = pb;
+    while (curr && curr->pb_graph_node) {
+        std::string part = curr->pb_graph_node->pb_type->name;
+        part += "[" + std::to_string(curr->pb_graph_node->placement_index) + "]";
+        path_parts.push_back(part);
+        curr = curr->parent_pb;
+    }
+
+    std::string result;
+    for (auto it = path_parts.rbegin(); it != path_parts.rend(); ++it) {
+        if (!result.empty()) result += "/";
+        result += *it;
+    }
+    return result;
+}
+
+// Recursive helper to find and describe overloaded pin classes in pb hierarchy
+static void describe_pb_pin_utilization_recursive(const t_pb* cur_pb,
+                                                   t_ext_pin_util max_external_pin_util,
+                                                   std::ostringstream& oss,
+                                                   int depth,
+                                                   bool& found_overloaded) {
+    if (!cur_pb || !cur_pb->pb_graph_node || !cur_pb->pb_stats) {
+        return;
+    }
+
+    const auto& atom_ctx = g_vpr_ctx.atom();
+    const t_pb_type* pb_type = cur_pb->pb_graph_node->pb_type;
+
+    // Only analyze clusters (nodes with modes), not primitives
+    if (pb_type->num_modes == 0 || !cur_pb->name) {
+        return;
+    }
+
+    std::string indent(depth * 2, ' ');
+    std::string pb_path = get_pb_hierarchical_path(cur_pb);
+
+    // Check input pin classes at this level
+    for (int i = 0; i < cur_pb->pb_graph_node->num_input_pin_class; i++) {
+        size_t initial_class_size = cur_pb->pb_graph_node->input_pin_class_size[i];
+        size_t class_size = initial_class_size;
+
+        if (cur_pb->is_root()) {
+            class_size = std::ceil(max_external_pin_util.input_pin_util * class_size);
+            class_size = std::max<size_t>(class_size, cur_pb->pb_stats->input_pins_used[i].size());
+        }
+
+        size_t used = cur_pb->pb_stats->lookahead_input_pins_used[i].size();
+
+        if (used > class_size) {
+            found_overloaded = true;
+
+            // Find port name for this class
+            std::string port_name = "unknown";
+            for (int port = 0; port < cur_pb->pb_graph_node->num_input_ports; ++port) {
+                for (int pin = 0; pin < cur_pb->pb_graph_node->num_input_pins[port]; ++pin) {
+                    if (cur_pb->pb_graph_node->input_pins[port][pin].pin_class == i) {
+                        port_name = cur_pb->pb_graph_node->input_pins[port][pin].port->name;
+                        break;
+                    }
+                }
+                if (port_name != "unknown") break;
+            }
+
+            oss << indent << "*** OVERLOADED at " << pb_path << " ***\n";
+            oss << indent << "  Input Pin Class " << i << " (Port: " << port_name << ")\n";
+            oss << indent << "  Used: " << used << ", Capacity: " << class_size;
+            if (class_size != initial_class_size) {
+                oss << " (scaled from " << initial_class_size << ")";
+            }
+            oss << "\n";
+
+            // List competing nets
+            oss << indent << "  Competing nets (" << used << " total):\n";
+            size_t max_to_show = 20;
+            size_t shown = 0;
+            for (const auto& net_id : cur_pb->pb_stats->lookahead_input_pins_used[i]) {
+                if (shown >= max_to_show) {
+                    oss << indent << "    ... and " << (used - shown) << " more nets\n";
+                    break;
+                }
+                if (net_id.is_valid()) {
+                    std::string net_name = atom_ctx.nlist.net_name(net_id);
+                    AtomPinId driver_pin = atom_ctx.nlist.net_driver(net_id);
+                    std::string driver_info;
+                    if (driver_pin.is_valid()) {
+                        AtomBlockId driver_blk = atom_ctx.nlist.pin_block(driver_pin);
+                        if (driver_blk.is_valid()) {
+                            driver_info = " (driver: " + atom_ctx.nlist.block_name(driver_blk) + ")";
+                        }
+                    }
+                    oss << indent << "    - " << net_name << driver_info << "\n";
+                }
+                shown++;
+            }
+            oss << "\n";
+        }
+    }
+
+    // Check output pin classes at this level
+    for (int i = 0; i < cur_pb->pb_graph_node->num_output_pin_class; i++) {
+        size_t initial_class_size = cur_pb->pb_graph_node->output_pin_class_size[i];
+        size_t class_size = initial_class_size;
+
+        if (cur_pb->is_root()) {
+            class_size = std::ceil(max_external_pin_util.output_pin_util * class_size);
+            class_size = std::max<size_t>(class_size, cur_pb->pb_stats->output_pins_used[i].size());
+        }
+
+        size_t used = cur_pb->pb_stats->lookahead_output_pins_used[i].size();
+
+        if (used > class_size) {
+            found_overloaded = true;
+
+            std::string port_name = "unknown";
+            for (int port = 0; port < cur_pb->pb_graph_node->num_output_ports; ++port) {
+                for (int pin = 0; pin < cur_pb->pb_graph_node->num_output_pins[port]; ++pin) {
+                    if (cur_pb->pb_graph_node->output_pins[port][pin].pin_class == i) {
+                        port_name = cur_pb->pb_graph_node->output_pins[port][pin].port->name;
+                        break;
+                    }
+                }
+                if (port_name != "unknown") break;
+            }
+
+            oss << indent << "*** OVERLOADED at " << pb_path << " ***\n";
+            oss << indent << "  Output Pin Class " << i << " (Port: " << port_name << ")\n";
+            oss << indent << "  Used: " << used << ", Capacity: " << class_size << "\n";
+
+            oss << indent << "  Competing nets (" << used << " total):\n";
+            size_t max_to_show = 20;
+            size_t shown = 0;
+            for (const auto& net_id : cur_pb->pb_stats->lookahead_output_pins_used[i]) {
+                if (shown >= max_to_show) {
+                    oss << indent << "    ... and " << (used - shown) << " more nets\n";
+                    break;
+                }
+                if (net_id.is_valid()) {
+                    oss << indent << "    - " << atom_ctx.nlist.net_name(net_id) << "\n";
+                }
+                shown++;
+            }
+            oss << "\n";
+        }
+    }
+
+    // Recurse into children
+    if (cur_pb->child_pbs) {
+        for (int i = 0; i < pb_type->modes[cur_pb->mode].num_pb_type_children; i++) {
+            if (cur_pb->child_pbs[i]) {
+                for (int j = 0; j < pb_type->modes[cur_pb->mode].pb_type_children[i].num_pb; j++) {
+                    describe_pb_pin_utilization_recursive(&cur_pb->child_pbs[i][j],
+                                                          max_external_pin_util,
+                                                          oss, depth + 1,
+                                                          found_overloaded);
+                }
+            }
+        }
+    }
+}
+
+std::string describe_pin_feasibility_failure(const t_pb* cur_pb, t_ext_pin_util max_external_pin_util) {
+    if (!cur_pb || !cur_pb->pb_graph_node || !cur_pb->pb_stats) {
+        return "  <No pb data available for pin feasibility analysis>\n";
+    }
+
+    std::ostringstream oss;
+    const t_pb_type* pb_type = cur_pb->pb_graph_node->pb_type;
+
+    // Only analyze clusters (nodes with modes), not primitives
+    if (pb_type->num_modes == 0 || !cur_pb->name) {
+        return "  <Not a cluster node>\n";
+    }
+
+    oss << "  PIN UTILIZATION ANALYSIS:\n";
+    oss << "    Input pin utilization factor: " << max_external_pin_util.input_pin_util << "\n";
+    oss << "    Output pin utilization factor: " << max_external_pin_util.output_pin_util << "\n\n";
+
+    // First show root-level summary
+    oss << "  ROOT LEVEL (" << pb_type->name << "):\n";
+    for (int i = 0; i < cur_pb->pb_graph_node->num_input_pin_class; i++) {
+        size_t initial_class_size = cur_pb->pb_graph_node->input_pin_class_size[i];
+        size_t class_size = initial_class_size;
+        if (cur_pb->is_root()) {
+            class_size = std::ceil(max_external_pin_util.input_pin_util * class_size);
+            class_size = std::max<size_t>(class_size, cur_pb->pb_stats->input_pins_used[i].size());
+        }
+        size_t used = cur_pb->pb_stats->lookahead_input_pins_used[i].size();
+
+        if (used > 0) {
+            std::string port_name = "unknown";
+            for (int port = 0; port < cur_pb->pb_graph_node->num_input_ports; ++port) {
+                for (int pin = 0; pin < cur_pb->pb_graph_node->num_input_pins[port]; ++pin) {
+                    if (cur_pb->pb_graph_node->input_pins[port][pin].pin_class == i) {
+                        port_name = cur_pb->pb_graph_node->input_pins[port][pin].port->name;
+                        break;
+                    }
+                }
+                if (port_name != "unknown") break;
+            }
+            oss << "    Input Pin Class " << i << " (Port: " << port_name << "): ";
+            oss << (used > class_size ? "*** OVERLOADED ***" : "OK");
+            oss << "\n      Used: " << used << ", Capacity: " << class_size << "\n";
+        }
+    }
+    for (int i = 0; i < cur_pb->pb_graph_node->num_output_pin_class; i++) {
+        size_t initial_class_size = cur_pb->pb_graph_node->output_pin_class_size[i];
+        size_t class_size = initial_class_size;
+        if (cur_pb->is_root()) {
+            class_size = std::ceil(max_external_pin_util.output_pin_util * class_size);
+            class_size = std::max<size_t>(class_size, cur_pb->pb_stats->output_pins_used[i].size());
+        }
+        size_t used = cur_pb->pb_stats->lookahead_output_pins_used[i].size();
+
+        if (used > 0) {
+            std::string port_name = "unknown";
+            for (int port = 0; port < cur_pb->pb_graph_node->num_output_ports; ++port) {
+                for (int pin = 0; pin < cur_pb->pb_graph_node->num_output_pins[port]; ++pin) {
+                    if (cur_pb->pb_graph_node->output_pins[port][pin].pin_class == i) {
+                        port_name = cur_pb->pb_graph_node->output_pins[port][pin].port->name;
+                        break;
+                    }
+                }
+                if (port_name != "unknown") break;
+            }
+            oss << "    Output Pin Class " << i << " (Port: " << port_name << "): ";
+            oss << (used > class_size ? "*** OVERLOADED ***" : "OK");
+            oss << "\n      Used: " << used << ", Capacity: " << class_size << "\n";
+        }
+    }
+
+    // Now recursively find and show any overloaded child pbs
+    oss << "\n  CHECKING CHILD PB HIERARCHY FOR OVERLOADS:\n";
+    bool found_overloaded = false;
+
+    // Check children (skip root, we already showed it)
+    if (cur_pb->child_pbs) {
+        for (int i = 0; i < pb_type->modes[cur_pb->mode].num_pb_type_children; i++) {
+            if (cur_pb->child_pbs[i]) {
+                for (int j = 0; j < pb_type->modes[cur_pb->mode].pb_type_children[i].num_pb; j++) {
+                    describe_pb_pin_utilization_recursive(&cur_pb->child_pbs[i][j],
+                                                          max_external_pin_util,
+                                                          oss, 2,
+                                                          found_overloaded);
+                }
+            }
+        }
+    }
+
+    if (!found_overloaded) {
+        oss << "    No overloaded pin classes found in child hierarchy.\n";
+        oss << "    (Failure may be due to placement constraints rather than pin capacity)\n";
+    }
+
+    return oss.str();
+}

@@ -18,6 +18,7 @@
 #include <map>
 #include <queue>
 #include <set>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -181,6 +182,9 @@ static void modify_molecule(t_pack_molecule* molecule,
                             const AtomNetlist& atom_nlist);
 
 static bool check_lut_chain_molecules(t_pack_molecule* molecule, const AtomNetlist& atom_nlist);
+
+static bool validate_skip_chain_row_inputs(const t_pack_molecule* molecule,
+                                           const AtomNetlist& atom_nlist);
 
 /*****************************************/
 /*Function Definitions					 */
@@ -1668,14 +1672,16 @@ static bool try_expand_molecule(t_pack_molecule* molecule,
         bool reachable = chain_input_is_reachable(molecule, atom_molecules, atom_nlist);
         bool alm_ok = check_alm_input_limitation(molecule, atom_nlist);
         bool lut_ok = check_lut_chain_molecules(molecule, atom_nlist);
+        bool skip_chain_ok = validate_skip_chain_row_inputs(molecule, atom_nlist);
         if (debug_lut_chain) {
-            VTR_LOG("try_expand_molecule[%s]: chain checks reachable=%d alm_ok=%d lut_ok=%d\n",
+            VTR_LOG("try_expand_molecule[%s]: chain checks reachable=%d alm_ok=%d lut_ok=%d skip_chain_ok=%d\n",
                     pattern_name.c_str(),
                     reachable ? 1 : 0,
                     alm_ok ? 1 : 0,
-                    lut_ok ? 1 : 0);
+                    lut_ok ? 1 : 0,
+                    skip_chain_ok ? 1 : 0);
         }
-        return reachable && alm_ok && lut_ok;
+        return reachable && alm_ok && lut_ok && skip_chain_ok;
     }
 
     // if all non-optional positions in the pack pattern have atoms
@@ -2964,6 +2970,113 @@ static AtomBlockId is_second_level_block(const t_pack_pattern_block* pattern_blo
     }
 
     return AtomBlockId::INVALID();
+}
+
+/**
+ * @brief Validates that second-level blocks in a skip chain have valid inputs.
+ *
+ * For skip chain patterns (2-row chains), each adder in the second row should
+ * have its 'a' or 'b' input fed from the corresponding adder in the first row.
+ * This function validates that any second-level block (one receiving a/b input
+ * from another pattern block) has that input coming from:
+ *   1. A block within the same molecule (expected case), OR
+ *   2. A constant net (vcc/gnd) - this is allowed as an exception
+ *
+ * If a second-level block's a/b input comes from an external source (not in
+ * the molecule and not a constant), the molecule is rejected because it would
+ * require too many external pins.
+ *
+ * @param molecule     The molecule to validate.
+ * @param atom_nlist   The atom netlist for looking up connections.
+ * @return true if valid, false if the molecule should be rejected.
+ */
+static bool validate_skip_chain_row_inputs(const t_pack_molecule* molecule,
+                                           const AtomNetlist& atom_nlist) {
+    // Only apply to chain molecules
+    if (!molecule->is_chain())
+        return true;
+
+    // Get the cin port model to distinguish cin connections from a/b connections
+    const auto cin_pin = molecule->pack_pattern->chain_root_pins[0][0];
+    const auto cin_port_model = cin_pin->port->model_port;
+
+    // Build a set of all atom blocks in this molecule for quick lookup
+    std::unordered_set<AtomBlockId> molecule_atoms;
+    for (const auto& atom_id : molecule->atom_block_ids) {
+        if (atom_id.is_valid()) {
+            molecule_atoms.insert(atom_id);
+        }
+    }
+
+    // Check each pattern block
+    for (int block_idx = 0; block_idx < molecule->num_blocks; block_idx++) {
+        AtomBlockId atom_id = molecule->atom_block_ids[block_idx];
+        if (!atom_id.is_valid())
+            continue;
+
+        // Find if this block has a connection from another block via a non-cin port
+        // (i.e., it's a second-level block receiving a/b input)
+        auto* pattern_block = get_atom_pattern_block(molecule, block_idx);
+        if (!pattern_block)
+            continue;
+
+        auto* connection = pattern_block->connections;
+        while (connection) {
+            // Check if this block is receiving input through a non-cin port
+            // from another pattern block
+            if (connection->to_block == pattern_block &&
+                connection->to_pin->port->model_port != cin_port_model) {
+
+                // This is a second-level block receiving a/b input
+                // We need to verify the ACTUAL driver of this pin is within the molecule
+                // (not just that the pattern expects it to be)
+
+                // Get the actual net driving this pin on the atom
+                const auto to_port_model = connection->to_pin->port->model_port;
+                const auto to_pin_number = connection->to_pin->pin_number;
+                auto port_id = atom_nlist.find_atom_port(atom_id, to_port_model);
+
+                if (port_id) {
+                    auto net_id = atom_nlist.port_net(port_id, to_pin_number);
+                    if (net_id) {
+                        auto driver_pin = atom_nlist.net_driver(net_id);
+                        if (driver_pin.is_valid()) {
+                            AtomBlockId driver_block = atom_nlist.pin_block(driver_pin);
+                            if (driver_block.is_valid()) {
+                                std::string driver_name = atom_nlist.block_name(driver_block);
+
+                                // Allow vcc and gnd as valid external inputs
+                                if (driver_name == "vcc" || driver_name == "gnd" ||
+                                    driver_name == "VCC" || driver_name == "GND" ||
+                                    driver_name == "$true" || driver_name == "$false") {
+                                    connection = connection->next;
+                                    continue;
+                                }
+
+                                // Check if the ACTUAL driver is within the molecule
+                                if (molecule_atoms.count(driver_block)) {
+                                    connection = connection->next;
+                                    continue;
+                                }
+
+                                // Driver is external and not a constant - reject this molecule
+                                VTR_LOGV(true,
+                                    "Rejecting skip chain molecule: block '%s' has external input "
+                                    "on port '%s' from '%s' (not in molecule and not constant)\n",
+                                    atom_nlist.block_name(atom_id).c_str(),
+                                    to_port_model->name,
+                                    driver_name.c_str());
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+            connection = connection->next;
+        }
+    }
+
+    return true;
 }
 
 // get the number of ALM inputs feeding the LUTs. The assumption is

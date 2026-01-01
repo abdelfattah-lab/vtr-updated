@@ -451,4 +451,20 @@ private:
  */
 extern ClusteringHistoryLogger* g_clustering_history_logger;
 
+/**
+ * @brief Build a detailed description of why pin feasibility check failed.
+ *
+ * This function examines the lookahead pin usage in a cluster and returns
+ * a detailed string describing which pin classes exceeded their capacity
+ * and which nets are competing for those pins.
+ *
+ * Similar to describe_congestion() for routing failures, this provides
+ * visibility into why the pin feasibility filter rejected a packing attempt.
+ *
+ * @param cur_pb               The pb (cluster) that failed the pin feasibility check.
+ * @param max_external_pin_util The maximum external pin utilization factor used.
+ * @return                     A formatted string describing the failure details.
+ */
+std::string describe_pin_feasibility_failure(const t_pb* cur_pb, t_ext_pin_util max_external_pin_util);
+
 #endif // CLUSTERING_HISTORY_LOGGER_H

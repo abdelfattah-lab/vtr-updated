@@ -1628,7 +1628,8 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
             try_update_lookahead_pins_used(cluster.pb, atom_cluster_);
             if (!check_lookahead_pins_used(cluster.pb, max_external_pin_util)) {
                 block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
-                last_failure_reason = "Pin feasibility filter failed (exceeded external pin utilization)";
+                last_failure_reason = "Pin feasibility filter failed (exceeded external pin utilization)\n" +
+                                      describe_pin_feasibility_failure(cluster.pb, max_external_pin_util);
             }
         }
 
