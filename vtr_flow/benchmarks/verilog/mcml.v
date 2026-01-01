@@ -13107,13 +13107,13 @@ ScattererReflectorWrapper scattererReflector(
 
 always @ (hit__37 or ux_scatterer or uy_scatterer or uz_scatterer or layer__37 or dead__37 or
 			ux_reflector or uy_reflector or uz_reflector or layer_reflector or dead_reflector) begin
-   case (hit__37)   
+   case (hit__37)
    0: begin
        o_ux = ux_scatterer;
        o_uy = uy_scatterer;
        o_uz = uz_scatterer;
        o_layer = layer__37;
-       o_dead = dead__37;          
+       o_dead = dead__37;
    end
    1: begin
       o_ux = ux_reflector;
@@ -13121,7 +13121,14 @@ always @ (hit__37 or ux_scatterer or uy_scatterer or uz_scatterer or layer__37 o
       o_uz = uz_reflector;
       o_layer = layer_reflector;
       o_dead = dead_reflector;
-   end   
+   end
+   default: begin
+      o_ux = 0;
+      o_uy = 0;
+      o_uz = 0;
+      o_layer = 0;
+      o_dead = 0;
+   end
    endcase 
     
 end
@@ -17982,8 +17989,11 @@ always @ (i_uz35 or i_layer35) begin
 			default: fresIndex		=	{3'b000, negUz[30:24]};
 		endcase
 	end
+	default: begin
+		fresIndex = 0;
+	end
 	endcase
-		
+
 end
 
 
@@ -18035,6 +18045,9 @@ always @ (i_uz3 or i_layer3 or down_niOverNt_2_1 or up_niOverNt_2_1 or
 			5: op1_4_1			=	{up_niOverNt_2_5[63], up_niOverNt_2_5[61:31]};
 			default: op1_4_1		=	{up_niOverNt_2_1[63], up_niOverNt_2_1[61:31]};
 		endcase
+	end
+	default: begin
+		op1_4_1 = 0;
 	end
 	endcase
 end
@@ -18111,6 +18124,10 @@ always @ (i_uz35 or i_layer35 or down_niOverNt_1 or up_niOverNt_1 or
 				op2_36_2		=	up_niOverNt_1;
 			end
 		endcase
+	end
+	default: begin
+		op1_36_2 = 0;
+		op2_36_2 = 0;
 	end
 	endcase
 end
@@ -18290,8 +18307,13 @@ always @ (i_uz36 or downCritAngle or upCritAngle or down_rFresnel or i_ux36 or
 			end
 			new_uz			= -uz2__37;
 		end
+		default: begin
+			new_layer = 0;
+			new_dead = 0;
+			new_uz = 0;
+		end
 		endcase
-	
+
 	end
 end
 
