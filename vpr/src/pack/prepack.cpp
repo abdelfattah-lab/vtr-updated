@@ -3060,12 +3060,16 @@ static bool validate_skip_chain_row_inputs(const t_pack_molecule* molecule,
                                 }
 
                                 // Driver is external and not a constant - reject this molecule
-                                VTR_LOGV(true,
-                                    "Rejecting skip chain molecule: block '%s' has external input "
-                                    "on port '%s' from '%s' (not in molecule and not constant)\n",
-                                    atom_nlist.block_name(atom_id).c_str(),
-                                    to_port_model->name,
-                                    driver_name.c_str());
+                                // Note: This is expected for molecules that don't follow skip chain constraints
+                                // Enable debug_skip_chain_validation to see rejection details
+                                constexpr bool debug_skip_chain_validation = false;
+                                if (debug_skip_chain_validation) {
+                                    VTR_LOG("Rejecting skip chain molecule: block '%s' has external input "
+                                        "on port '%s' from '%s' (not in molecule and not constant)\n",
+                                        atom_nlist.block_name(atom_id).c_str(),
+                                        to_port_model->name,
+                                        driver_name.c_str());
+                                }
                                 return false;
                             }
                         }
