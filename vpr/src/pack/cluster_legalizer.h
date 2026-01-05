@@ -12,7 +12,11 @@
 
 #pragma once
 
+#include <memory>
+#include <string>
+#include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include "atom_netlist_fwd.h"
 #include "noc_data_types.h"
@@ -29,7 +33,6 @@ class Prepacker;
 class t_intra_cluster_placement_stats;
 class t_pb_graph_node;
 struct t_lb_router_data;
-struct PlacementAttemptInfo;  // Forward declaration from clustering_history_logger.h
 
 /**
  * @brief Check if two pb_graph_nodes represent the same logical location.
@@ -112,6 +115,40 @@ struct LegalizationCluster {
     ///        placed in the cluster. This is used when the legalizer decides
     ///        what sites it should try to put a new molecule into.
     t_intra_cluster_placement_stats* placement_stats;
+};
+
+/**
+ * @brief Tracks a batch of CLBs being created together for multi-chain packing.
+ *
+ * When a long chain molecule is used as a seed, we create multiple CLBs
+ * upfront (one per molecule in the chain). This struct tracks the batch
+ * and which chains are packed into which CLBs, enabling atomic commit/rollback
+ * of entire chains across all CLBs.
+ *
+ * This ensures that if chains A and B share CLB[0], they also share CLB[1],
+ * CLB[2], etc., preventing placement macro conflicts.
+ */
+struct t_multi_chain_batch {
+    /// @brief The CLB IDs in this batch, in order (CLB[0] = head of chains)
+    std::vector<LegalizationClusterId> clb_ids;
+
+    /// @brief For each chain packed into this batch, track which molecules were added
+    ///        to which CLBs. Key is the chain_info pointer, value is vector of
+    ///        (clb_index, molecule) pairs for rollback.
+    std::unordered_map<t_chain_info*,
+                       std::vector<std::pair<size_t, t_pack_molecule*>>> chain_molecules;
+
+    /// @brief The seed chain that created this batch
+    t_chain_info* seed_chain = nullptr;
+
+    /// @brief The logical block type for all CLBs in this batch
+    t_logical_block_type_ptr cluster_type = nullptr;
+
+    /// @brief The mode used for all CLBs in this batch
+    int cluster_mode = 0;
+
+    /// @brief Whether this batch has been finalized (committed)
+    bool finalized = false;
 };
 
 /*
@@ -523,6 +560,70 @@ public:
     inline void set_log_verbosity(int verbosity) {
         log_verbosity_ = verbosity;
     }
+
+    /*
+     * @brief Get the failure info from the last try_pack_molecule call.
+     *
+     * Returns information about why the last molecule placement attempt failed,
+     * including the number of placements tried and a description of the failure.
+     *
+     *  @return Tuple of (num_placements_tried, failure_reason, placement_attempts_as_strings).
+     *          Each placement attempt is a pair of (primitive_path, failure_reason).
+     */
+    std::tuple<int, std::string, std::vector<std::pair<std::string, std::string>>> get_last_molecule_failure_info() const;
+
+    /*
+     * @brief Create a batch of CLBs for multi-chain packing.
+     *
+     * Creates multiple CLBs upfront for packing an entire long chain. This
+     * enables atomic commit/rollback of chains across all CLBs, ensuring that
+     * chains that share CLB[0] also share CLB[1], CLB[2], etc.
+     *
+     *  @param seed_mol        The seed molecule (head of the primary chain).
+     *  @param cluster_type    The type of clusters to create.
+     *  @param cluster_mode    The mode for the clusters.
+     *  @param num_clbs        Number of CLBs to create in the batch.
+     *
+     *  @return A pointer to the batch structure, or nullptr on failure.
+     */
+    std::unique_ptr<t_multi_chain_batch> create_clb_batch(
+        t_pack_molecule* seed_mol,
+        t_logical_block_type_ptr cluster_type,
+        int cluster_mode,
+        size_t num_clbs);
+
+    /*
+     * @brief Rollback a specific chain from all CLBs in a batch.
+     *
+     * Removes all molecules belonging to the specified chain from all CLBs,
+     * while preserving other chains. Used when a candidate chain fails to
+     * pack into one of the CLBs in the batch.
+     *
+     *  @param batch           The batch to modify.
+     *  @param chain_info      The chain to remove (identified by chain_info pointer).
+     */
+    void rollback_chain_from_batch(t_multi_chain_batch& batch,
+                                   t_chain_info* chain_info);
+
+    /*
+     * @brief Finalize a batch, cleaning all CLBs for use.
+     *
+     * After this, the CLBs in the batch are ready for use in the clustered
+     * netlist. No more molecules can be added to these CLBs.
+     *
+     *  @param batch           The batch to finalize.
+     */
+    void finalize_batch(t_multi_chain_batch& batch);
+
+    /*
+     * @brief Destroy all CLBs in a batch and release the molecules.
+     *
+     * Used when the entire batch needs to be abandoned (e.g., seed chain
+     * itself fails to pack).
+     *
+     *  @param batch           The batch to destroy.
+     */
+    void destroy_batch(t_multi_chain_batch& batch);
 
     /// @brief Destructor of the class. Frees allocated data.
     ~ClusterLegalizer();

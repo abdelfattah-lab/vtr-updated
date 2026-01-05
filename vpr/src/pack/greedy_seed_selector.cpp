@@ -31,12 +31,26 @@ static inline float get_seed_gain(AtomBlockId blk_id,
                                   const e_cluster_seed seed_type,
                                   const t_molecule_stats& max_molecule_stats,
                                   const vtr::vector<AtomBlockId, float>& atom_criticality) {
+    // Weight for chain length bonus - prioritize long chains as seeds
+    constexpr float CHAIN_LENGTH_WEIGHT = 0.1f;
+
+    // Get chain bonus if molecule is part of a long chain
+    float chain_bonus = 0.0f;
+    const t_pack_molecule* mol = prepacker.get_atom_molecule(blk_id);
+    if (mol->is_chain() && mol->chain_info && mol->chain_info->is_long_chain) {
+        // Calculate chain length
+        size_t chain_length = prepacker.calc_chain_length(const_cast<t_pack_molecule*>(mol));
+        chain_bonus = CHAIN_LENGTH_WEIGHT * static_cast<float>(chain_length);
+    }
+
+    float base_gain = 0.0f;
     switch (seed_type) {
         // By criticality.
         // Intuition: starting a cluster with primitives that have timing-
         //            critical connections may help timing.
         case e_cluster_seed::TIMING:
-            return atom_criticality[blk_id];
+            base_gain = atom_criticality[blk_id];
+            break;
         // By number of used molecule input pins.
         // Intuition: molecules that use more inputs can be difficult to legally
         //            pack into partially full clusters. Use them as seeds
@@ -45,7 +59,8 @@ static inline float get_seed_gain(AtomBlockId blk_id,
         {
             const t_pack_molecule* blk_mol = prepacker.get_atom_molecule(blk_id);
             const t_molecule_stats molecule_stats = calc_molecule_stats(blk_mol, atom_netlist);
-            return molecule_stats.num_used_ext_inputs;
+            base_gain = molecule_stats.num_used_ext_inputs;
+            break;
         }
         // By blended gain (criticality and inputs used).
         case e_cluster_seed::BLEND:
@@ -63,7 +78,8 @@ static inline float get_seed_gain(AtomBlockId blk_id,
             float blend_gain = (seed_blend_fac * atom_criticality[blk_id]
                                 + (1 - seed_blend_fac) * used_ext_input_pin_ratio);
             blend_gain *= (1 + 0.2 * (molecule_stats.num_blocks - 1));
-            return blend_gain;
+            base_gain = blend_gain;
+            break;
         }
         // By pins per molecule (i.e. available pins on primitives, not pins in use).
         // Intuition (a weak one): primitive types with more pins might be
@@ -72,7 +88,8 @@ static inline float get_seed_gain(AtomBlockId blk_id,
         {
             const t_pack_molecule* blk_mol = prepacker.get_atom_molecule(blk_id);
             const t_molecule_stats molecule_stats = calc_molecule_stats(blk_mol, atom_netlist);
-            return molecule_stats.num_pins;
+            base_gain = molecule_stats.num_pins;
+            break;
         }
         // By input pins per molecule (i.e. available pins on primitives, not pins in use).
         // Intuition (a weak one): primitive types with more input pins might be
@@ -81,12 +98,13 @@ static inline float get_seed_gain(AtomBlockId blk_id,
         {
             const t_pack_molecule* blk_mol = prepacker.get_atom_molecule(blk_id);
             const t_molecule_stats molecule_stats = calc_molecule_stats(blk_mol, atom_netlist);
-            return molecule_stats.num_input_pins;
+            base_gain = molecule_stats.num_input_pins;
+            break;
         }
         case e_cluster_seed::BLEND2:
         {
-            const t_pack_molecule* mol = prepacker.get_atom_molecule(blk_id);
-            const t_molecule_stats molecule_stats = calc_molecule_stats(mol, atom_netlist);
+            const t_pack_molecule* blk_mol = prepacker.get_atom_molecule(blk_id);
+            const t_molecule_stats molecule_stats = calc_molecule_stats(blk_mol, atom_netlist);
 
             float pin_ratio = vtr::safe_ratio<float>(molecule_stats.num_pins, max_molecule_stats.num_pins);
             float input_pin_ratio = vtr::safe_ratio<float>(molecule_stats.num_input_pins, max_molecule_stats.num_input_pins);
@@ -106,23 +124,25 @@ static inline float get_seed_gain(AtomBlockId blk_id,
             constexpr float BLOCKS_WEIGHT = 0.2;
             constexpr float CRITICALITY_WEIGHT = 0.1;
 
-            float gain = PIN_WEIGHT * pin_ratio
-                         + INPUT_PIN_WEIGHT * input_pin_ratio
-                         + OUTPUT_PIN_WEIGHT * output_pin_ratio
+            base_gain = PIN_WEIGHT * pin_ratio
+                        + INPUT_PIN_WEIGHT * input_pin_ratio
+                        + OUTPUT_PIN_WEIGHT * output_pin_ratio
 
-                         + USED_PIN_WEIGHT * used_ext_pin_ratio
-                         + USED_INPUT_PIN_WEIGHT * used_ext_input_pin_ratio
-                         + USED_OUTPUT_PIN_WEIGHT * used_ext_output_pin_ratio
+                        + USED_PIN_WEIGHT * used_ext_pin_ratio
+                        + USED_INPUT_PIN_WEIGHT * used_ext_input_pin_ratio
+                        + USED_OUTPUT_PIN_WEIGHT * used_ext_output_pin_ratio
 
-                         + BLOCKS_WEIGHT * num_blocks_ratio
-                         + CRITICALITY_WEIGHT * criticality;
-
-            return gain;
+                        + BLOCKS_WEIGHT * num_blocks_ratio
+                        + CRITICALITY_WEIGHT * criticality;
+            break;
         }
         default:
             VPR_FATAL_ERROR(VPR_ERROR_PACK, "Unrecognized cluster seed type");
-            return 0.f;
+            break;
     }
+
+    // Add chain length bonus to base gain for long chain molecules
+    return base_gain + chain_bonus;
 }
 
 /**

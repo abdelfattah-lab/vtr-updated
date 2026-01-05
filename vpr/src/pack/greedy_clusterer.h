@@ -162,6 +162,33 @@ private:
                                            DeviceContext& mutable_device_ctx);
 
     /**
+     * @brief Try to grow a batch of clusters for multi-chain packing.
+     *
+     * When the seed is a long chain molecule, this method creates CLBs for the
+     * entire chain upfront, packs the seed chain into each CLB, finds and packs
+     * compatible candidate chains (ensuring they all share the same CLBs), fills
+     * remaining space with regular molecules, and returns all created cluster IDs.
+     *
+     * This ensures that if chains A and B share CLB[0], they also share CLB[1],
+     * CLB[2], etc., preventing placement macro conflicts.
+     *
+     * @return Vector of created cluster IDs, or empty vector on failure.
+     */
+    std::vector<LegalizationClusterId> try_grow_multi_chain_cluster(
+        t_pack_molecule* seed_mol,
+        ClusterLegalizationStrategy strategy,
+        ClusterLegalizer& cluster_legalizer,
+        Prepacker& prepacker,
+        bool allow_unrelated_clustering,
+        bool balance_block_type_utilization,
+        SetupTimingInfo& timing_info,
+        vtr::vector<LegalizationClusterId, std::vector<AtomNetId>>& clb_inter_blk_nets,
+        t_clustering_data& clustering_data,
+        AttractionInfo& attraction_groups,
+        std::map<t_logical_block_type_ptr, size_t>& num_used_type_instances,
+        DeviceContext& mutable_device_ctx);
+
+    /**
      * @brief Given a seed molecule, starts a new cluster by trying to find a
      *        good logical block type and mode to put it in. This method cannot
      *        fail (only crash if the seed cannot be clustered), so it should

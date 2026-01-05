@@ -2281,6 +2281,145 @@ void ClusterLegalizer::finalize() {
     }
 }
 
+std::unique_ptr<t_multi_chain_batch> ClusterLegalizer::create_clb_batch(
+    t_pack_molecule* seed_mol,
+    t_logical_block_type_ptr cluster_type,
+    int cluster_mode,
+    size_t num_clbs) {
+
+    auto batch = std::make_unique<t_multi_chain_batch>();
+    batch->cluster_type = cluster_type;
+    batch->cluster_mode = cluster_mode;
+    batch->seed_chain = seed_mol->chain_info.get();
+
+    // Create all CLBs upfront
+    for (size_t i = 0; i < num_clbs; i++) {
+        // Create an empty cluster (we'll add molecules separately)
+        LegalizationClusterId new_cluster_id = LegalizationClusterId(legalization_cluster_ids_.size());
+        legalization_cluster_ids_.push_back(new_cluster_id);
+
+        LegalizationCluster new_cluster;
+        new_cluster.type = cluster_type;
+
+        // Allocate a new pb
+        new_cluster.pb = new t_pb;
+        new_cluster.pb->pb_graph_node = cluster_type->pb_graph_head;
+        alloc_and_load_pb_stats(new_cluster.pb, feasible_block_array_size_);
+        new_cluster.pb->mode = cluster_mode;
+        new_cluster.pb->name = nullptr;  // Will be set when seed is added
+        new_cluster.pb->parent_pb = nullptr;
+
+        // Initialize the router data
+        new_cluster.router_data = alloc_and_load_router_data(&lb_type_rr_graphs_[cluster_type->index],
+                                                             cluster_type);
+
+        // Initialize placement stats
+        new_cluster.placement_stats = alloc_and_load_cluster_placement_stats(cluster_type, cluster_mode);
+
+        // Initialize NoC group to invalid
+        new_cluster.noc_grp_id = NocGroupId::INVALID();
+
+        legalization_clusters_.push_back(std::move(new_cluster));
+        batch->clb_ids.push_back(new_cluster_id);
+    }
+
+    return batch;
+}
+
+void ClusterLegalizer::rollback_chain_from_batch(t_multi_chain_batch& batch,
+                                                  t_chain_info* chain_info) {
+    // Find all molecules for this chain in the batch
+    auto it = batch.chain_molecules.find(chain_info);
+    if (it == batch.chain_molecules.end()) {
+        return;  // No molecules from this chain in the batch
+    }
+
+    const auto& mol_entries = it->second;
+
+    // Rollback each molecule from its CLB
+    for (const auto& entry : mol_entries) {
+        size_t clb_idx = entry.first;
+        t_pack_molecule* mol = entry.second;
+
+        if (clb_idx >= batch.clb_ids.size()) continue;
+
+        LegalizationClusterId cluster_id = batch.clb_ids[clb_idx];
+        if (!cluster_id.is_valid()) continue;
+
+        LegalizationCluster& cluster = legalization_clusters_[cluster_id];
+
+        // Remove each atom in the molecule from the cluster
+        int molecule_size = get_array_size_of_molecule(mol);
+        for (int i = 0; i < molecule_size; i++) {
+            AtomBlockId atom_blk_id = mol->atom_block_ids[i];
+            if (!atom_blk_id.is_valid()) continue;
+
+            // Remove from router targets
+            remove_atom_from_target(cluster.router_data, atom_blk_id);
+
+            // Revert the atom placement
+            revert_place_atom_block(atom_blk_id, cluster.router_data, atom_cluster_);
+
+            // Clear the atom's cluster assignment
+            atom_cluster_[atom_blk_id] = LegalizationClusterId::INVALID();
+        }
+
+        // Remove molecule from cluster's molecule list
+        auto& mols = cluster.molecules;
+        mols.erase(std::remove(mols.begin(), mols.end(), mol), mols.end());
+
+        // Clear molecule's cluster assignment
+        molecule_cluster_[mol] = LegalizationClusterId::INVALID();
+
+        // Free the chain slot if this was a long chain
+        if (mol->chain_info && mol->chain_info->is_long_chain) {
+            cluster.placement_stats->free_chain_slot(mol->chain_info->chain_id);
+        }
+    }
+
+    // Clear the chain's entry from the batch
+    batch.chain_molecules.erase(it);
+
+    // Cleanup the pb structures for affected clusters
+    for (size_t clb_idx = 0; clb_idx < batch.clb_ids.size(); clb_idx++) {
+        LegalizationClusterId cluster_id = batch.clb_ids[clb_idx];
+        if (!cluster_id.is_valid()) continue;
+        LegalizationCluster& cluster = legalization_clusters_[cluster_id];
+        cleanup_pb(cluster.pb);
+    }
+}
+
+std::tuple<int, std::string, std::vector<std::pair<std::string, std::string>>>
+ClusterLegalizer::get_last_molecule_failure_info() const {
+    std::vector<std::pair<std::string, std::string>> attempts;
+    for (const auto& attempt : last_molecule_failure_info_.placement_attempts) {
+        attempts.emplace_back(attempt.primitive_path, attempt.failure_reason);
+    }
+    return {last_molecule_failure_info_.num_placements_tried,
+            last_molecule_failure_info_.last_failure_reason,
+            attempts};
+}
+
+void ClusterLegalizer::finalize_batch(t_multi_chain_batch& batch) {
+    if (batch.finalized) return;
+
+    for (LegalizationClusterId cluster_id : batch.clb_ids) {
+        if (!cluster_id.is_valid()) continue;
+        clean_cluster(cluster_id);
+    }
+
+    batch.finalized = true;
+}
+
+void ClusterLegalizer::destroy_batch(t_multi_chain_batch& batch) {
+    for (LegalizationClusterId cluster_id : batch.clb_ids) {
+        if (!cluster_id.is_valid()) continue;
+        destroy_cluster(cluster_id);
+    }
+    batch.clb_ids.clear();
+    batch.chain_molecules.clear();
+}
+
 ClusterLegalizer::~ClusterLegalizer() {
     // Destroy all clusters (no need to compress).
     for (LegalizationClusterId cluster_id : legalization_cluster_ids_) {
