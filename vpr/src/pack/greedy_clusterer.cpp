@@ -59,6 +59,9 @@
 #include "vtr_math.h"
 #include "vtr_vector.h"
 
+// Set to true to enable verbose debug logging for multi-chain packing
+constexpr bool MULTI_CHAIN_DEBUG = false;
+
 namespace {
 
 /**
@@ -589,7 +592,7 @@ std::vector<LegalizationClusterId> GreedyClusterer::try_grow_multi_chain_cluster
         return created_clusters;
     }
 
-    if (log_verbosity_ > 1) {
+    if (MULTI_CHAIN_DEBUG && log_verbosity_ > 1) {
         VTR_LOG("Multi-chain packing: seed chain has %zu molecules\n", chain_length);
     }
 
@@ -653,7 +656,9 @@ std::vector<LegalizationClusterId> GreedyClusterer::try_grow_multi_chain_cluster
     // Create the batch of CLBs
     auto batch = cluster_legalizer.create_clb_batch(seed_mol, chosen_type, chosen_mode, chain_length);
     if (!batch || batch->clb_ids.size() != chain_length) {
-        VTR_LOG("Multi-chain packing: Failed to create CLB batch\n");
+        if (MULTI_CHAIN_DEBUG) {
+            VTR_LOG("Multi-chain packing: Failed to create CLB batch\n");
+        }
         return created_clusters;  // Empty
     }
 
@@ -677,7 +682,7 @@ std::vector<LegalizationClusterId> GreedyClusterer::try_grow_multi_chain_cluster
     AtomBlockId seed_root_atom = seed_mol->atom_block_ids[seed_mol->root];
     std::string seed_chain_name = atom_netlist_.block_name(seed_root_atom);
 
-    if (log_verbosity_ > 1) {
+    if (MULTI_CHAIN_DEBUG && log_verbosity_ > 1) {
         VTR_LOG("Multi-chain packing: Packing seed chain '%s' (length %zu) into %zu CLBs\n",
                 seed_chain_name.c_str(), chain_length, batch->clb_ids.size());
     }
@@ -694,7 +699,7 @@ std::vector<LegalizationClusterId> GreedyClusterer::try_grow_multi_chain_cluster
 
         e_block_pack_status status = cluster_legalizer.add_mol_to_cluster(mol, clb_id);
         if (status != e_block_pack_status::BLK_PASSED) {
-            if (log_verbosity_ > 1) {
+            if (MULTI_CHAIN_DEBUG && log_verbosity_ > 1) {
                 VTR_LOG("Multi-chain packing: Failed to pack seed chain molecule %zu into CLB %zu\n",
                         i, (size_t)clb_id);
             }
@@ -704,7 +709,7 @@ std::vector<LegalizationClusterId> GreedyClusterer::try_grow_multi_chain_cluster
             batch->chain_molecules[seed_mol->chain_info.get()].push_back({i, mol});
 
             // Log seed placement details
-            if (log_verbosity_ > 1) {
+            if (MULTI_CHAIN_DEBUG && log_verbosity_ > 1) {
                 auto [num_tried, detail, attempts] = cluster_legalizer.get_last_molecule_failure_info();
                 if (!attempts.empty()) {
                     VTR_LOG("Multi-chain packing:   Seed CLB[%zu] placed at: %s\n",
@@ -788,7 +793,7 @@ std::vector<LegalizationClusterId> GreedyClusterer::try_grow_multi_chain_cluster
     std::sort(candidate_chains.begin(), candidate_chains.end(),
               [](const auto& a, const auto& b) { return a.second > b.second; });
 
-    if (log_verbosity_ > 1 && !candidate_chains.empty()) {
+    if (MULTI_CHAIN_DEBUG && log_verbosity_ > 1 && !candidate_chains.empty()) {
         VTR_LOG("Multi-chain packing: Found %zu candidate chains\n", candidate_chains.size());
     }
 
@@ -809,14 +814,14 @@ std::vector<LegalizationClusterId> GreedyClusterer::try_grow_multi_chain_cluster
             }
         }
         if (any_clustered) {
-            if (log_verbosity_ > 2) {
+            if (MULTI_CHAIN_DEBUG && log_verbosity_ > 2) {
                 VTR_LOG("Multi-chain packing: Skipping candidate '%s' (already clustered)\n",
                         candidate_name.c_str());
             }
             continue;
         }
 
-        if (log_verbosity_ > 2) {
+        if (MULTI_CHAIN_DEBUG && log_verbosity_ > 2) {
             VTR_LOG("Multi-chain packing: Trying candidate chain '%s' (length %zu)\n",
                     candidate_name.c_str(), candidate_length);
         }
@@ -844,13 +849,13 @@ std::vector<LegalizationClusterId> GreedyClusterer::try_grow_multi_chain_cluster
         if (pack_success) {
             // Successfully packed entire candidate chain
             batch->chain_molecules[candidate_head->chain_info.get()] = std::move(packed_mols);
-            if (log_verbosity_ > 1) {
+            if (MULTI_CHAIN_DEBUG && log_verbosity_ > 1) {
                 VTR_LOG("Multi-chain packing: Successfully packed candidate chain of length %zu\n",
                         candidate_length);
             }
         } else {
             // Log the failure reason
-            if (log_verbosity_ > 1) {
+            if (MULTI_CHAIN_DEBUG && log_verbosity_ > 1) {
                 const char* failure_reason = "unknown";
                 switch (failure_status) {
                     case e_block_pack_status::BLK_FAILED_FEASIBLE:
@@ -1015,7 +1020,7 @@ std::vector<LegalizationClusterId> GreedyClusterer::try_grow_multi_chain_cluster
             if (!clb_id.is_valid()) continue;
             if (!cluster_legalizer.check_cluster_legality(clb_id)) {
                 all_legal = false;
-                if (log_verbosity_ > 1) {
+                if (MULTI_CHAIN_DEBUG && log_verbosity_ > 1) {
                     VTR_LOG("Multi-chain packing: CLB %zu failed final legality check\n",
                             (size_t)clb_id);
                 }
@@ -1093,7 +1098,7 @@ std::vector<LegalizationClusterId> GreedyClusterer::try_grow_multi_chain_cluster
         }
     }
 
-    if (log_verbosity_ > 0) {
+    if (MULTI_CHAIN_DEBUG && log_verbosity_ > 0) {
         VTR_LOG("Multi-chain packing: Created %zu CLBs with %zu chains\n",
                 created_clusters.size(), batch->chain_molecules.size());
     }
