@@ -201,6 +201,29 @@ GreedyClusterer::do_clustering(ClusterLegalizer& cluster_legalizer,
                                                             attraction_groups,
                                                             num_used_type_instances,
                                                             mutable_device_ctx);
+
+            if (new_cluster_ids.empty()) {
+                // If the previous strategy failed, try again with full legalization
+                // for each molecule added to the cluster.
+
+                // Log the retry with FULL strategy
+                if (g_clustering_history_logger && g_clustering_history_logger->is_enabled()) {
+                    g_clustering_history_logger->log_iteration_start(2, ClusterLegalizationStrategy::FULL);
+                }
+
+                new_cluster_ids = try_grow_multi_chain_cluster(seed_mol,
+                                                                ClusterLegalizationStrategy::FULL,
+                                                                cluster_legalizer,
+                                                                prepacker,
+                                                                allow_unrelated_clustering,
+                                                                balance_block_type_utilization,
+                                                                *timing_info,
+                                                                clb_inter_blk_nets,
+                                                                clustering_data,
+                                                                attraction_groups,
+                                                                num_used_type_instances,
+                                                                mutable_device_ctx);
+            }
         } else {
             // Try to grow a cluster from the seed molecule without doing intra-lb
             // route for each molecule (i.e. just use faster but not fully
