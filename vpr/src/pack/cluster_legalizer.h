@@ -35,6 +35,16 @@ class t_pb_graph_node;
 struct t_lb_router_data;
 
 /**
+ * @brief Information about a single primitive placement attempt.
+ *
+ * Used to track which placements were tried and why they failed.
+ */
+struct PlacementAttemptInfo {
+    std::string primitive_path;   ///< Hierarchical path to the primitive (e.g., "clb[0]/fle[0]/ble5[0]/lut5[0]")
+    std::string failure_reason;   ///< Why this placement failed (empty if not yet determined)
+};
+
+/**
  * @brief Check if two pb_graph_nodes represent the same logical location.
  *
  * This compares nodes based on pb_type name and placement_index at each hierarchy

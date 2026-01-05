@@ -42,15 +42,7 @@ struct t_lb_router_data;
 struct t_lb_type_rr_node;
 struct t_lb_rr_node_stats;
 
-/**
- * @brief Information about a single primitive placement attempt.
- *
- * Used to track which placements were tried and why they failed.
- */
-struct PlacementAttemptInfo {
-    std::string primitive_path;   ///< Hierarchical path to the primitive (e.g., "clb[0]/fle[0]/ble5[0]/lut5[0]")
-    std::string failure_reason;   ///< Why this placement failed (empty if not yet determined)
-};
+// PlacementAttemptInfo is defined in cluster_legalizer.h (included above)
 
 /**
  * @brief Logger for recording CLB creation history during clustering.
