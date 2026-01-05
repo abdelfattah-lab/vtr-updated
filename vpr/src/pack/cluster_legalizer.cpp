@@ -1495,17 +1495,34 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
         VTR_LOG("\n");
     }
 
-    // if this cluster has a molecule placed in it that is part of a long chain
-    // (a chain that consists of more than one molecule), don't allow more long chain
-    // molecules to be placed in this cluster. To avoid possibly creating cluster level
-    // blocks that have incompatible placement constraints or form very long placement
-    // macros that limit placement flexibility.
-    if (cluster.placement_stats->has_long_chain && molecule->is_chain() && molecule->chain_info->is_long_chain) {
-        VTR_LOGV(log_verbosity_ > 4, "\t\t\tFAILED Placement Feasibility Filter: Only one long chain per cluster is allowed\n");
-        //Record the failure of this molecule in the current pb stats
-        record_molecule_failure(molecule, cluster.pb);
-        // Free the allocated data.
-        return e_block_pack_status::BLK_FAILED_FEASIBLE;
+    // Multi-chain packing support: check if the required chain slot is available.
+    // A cluster can have multiple independent long chains if they use different
+    // architectural chain slots (chain_root_pins[0], chain_root_pins[1], etc.).
+    if (molecule->is_chain() && molecule->chain_info && molecule->chain_info->is_long_chain) {
+        // Get the number of independent chain slots from the architecture
+        const auto& chain_root_pins = molecule->pack_pattern->chain_root_pins;
+        size_t num_chain_slots = chain_root_pins.size();
+
+        // Check if any chain slot is available
+        if (!cluster.placement_stats->has_available_chain_slot(num_chain_slots)) {
+            VTR_LOGV(log_verbosity_ > 4,
+                     "\t\t\tFAILED Placement Feasibility Filter: No available chain slots in cluster "
+                     "(all %zu slots occupied)\n", num_chain_slots);
+            record_molecule_failure(molecule, cluster.pb);
+            return e_block_pack_status::BLK_FAILED_FEASIBLE;
+        }
+
+        // Check if the specific required chain slot is available
+        // chain_id == -1 means this is the first molecule in chain (can use any slot)
+        // chain_id >= 0 means this molecule must use a specific slot to maintain chain continuity
+        int required_slot = molecule->chain_info->chain_id;
+        if (required_slot >= 0 && !cluster.placement_stats->is_chain_slot_available(required_slot)) {
+            VTR_LOGV(log_verbosity_ > 4,
+                     "\t\t\tFAILED Placement Feasibility Filter: Required chain slot %d is already occupied\n",
+                     required_slot);
+            record_molecule_failure(molecule, cluster.pb);
+            return e_block_pack_status::BLK_FAILED_FEASIBLE;
+        }
     }
 
     // Check if every atom in the molecule is legal in the cluster from a
@@ -1719,16 +1736,20 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(t_pack_molecule* molecul
                         cur_pb->name = vtr::strdup(atom_ctx.nlist.block_name(chain_root_blk_id).c_str());
                         cur_pb = cur_pb->parent_pb;
                     }
-                    // if this molecule is part of a chain, mark the cluster as having a long chain
-                    // molecule. Also check if it's the first molecule in the chain to be packed.
+                    // if this molecule is part of a long chain, track which chain slot it occupies.
+                    // This enables multi-chain packing where independent chains can share a CLB
+                    // if they use different architectural chain slots.
+                    // Also check if it's the first molecule in the chain to be packed.
                     // If so, update the chain id for this chain of molecules to make sure all
                     // molecules will be packed to the same chain id and can reach each other using
                     // the chain direct links between clusters
                     if (molecule->chain_info->is_long_chain) {
-                        cluster.placement_stats->has_long_chain = true;
+                        // If this is the first molecule in the chain, determine which chain slot to use
                         if (molecule->chain_info->chain_id == -1) {
                             update_molecule_chain_info(molecule, primitives_list[molecule->root]);
                         }
+                        // Mark the chain slot as occupied (chain_id should now be set)
+                        cluster.placement_stats->occupy_chain_slot(molecule->chain_info->chain_id);
                     }
                 }
 

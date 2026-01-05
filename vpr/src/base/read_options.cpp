@@ -1905,6 +1905,15 @@ argparse::ArgumentParser create_arg_parser(const std::string& prog_name, t_optio
         .default_value("semiDirectedSwap")
         .show_in(argparse::ShowIn::HELP_ONLY);
 
+    pack_grp.add_argument<bool, ParseOnOff>(args.pack_multi_chain, "--pack_multi_chain")
+        .help(
+            "Enables multi-chain packing: allows multiple independent long chains "
+            "(e.g., carry chains) to share the same sequence of CLBs when the "
+            "architecture supports multiple chain slots. This can improve resource "
+            "utilization for designs with many carry chains.")
+        .default_value("on")
+        .show_in(argparse::ShowIn::HELP_ONLY);
+
     auto& place_grp = parser.add_argument_group("placement options");
 
     place_grp.add_argument(args.Seed, "--seed")

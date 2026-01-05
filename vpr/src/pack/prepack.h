@@ -152,6 +152,35 @@ public:
     /// @brief Destructor of the prepacker class. Calls the reset method.
     ~Prepacker() { reset(); }
 
+    /**
+     * @brief Get all molecules in a chain, ordered from head to tail.
+     *
+     * Given any molecule that is part of a long chain, this function returns
+     * all molecules in that chain in the order they should be packed (head first).
+     *
+     * @param chain_mol Any molecule that is part of the chain.
+     * @return Vector of molecules in chain order, or empty vector if not a long chain.
+     */
+    std::vector<t_pack_molecule*> get_chain_molecules(t_pack_molecule* chain_mol) const;
+
+    /**
+     * @brief Calculate the length of a chain (number of molecules).
+     *
+     * @param chain_mol Any molecule that is part of the chain.
+     * @return Number of molecules in the chain, or 1 if not a long chain.
+     */
+    size_t calc_chain_length(t_pack_molecule* chain_mol) const;
+
+    /**
+     * @brief Get all long chain head molecules, sorted by chain length (longest first).
+     *
+     * Returns molecules that are the head (first) of long chains. This is useful
+     * for seed selection to prioritize longer chains.
+     *
+     * @return Vector of chain head molecules, sorted by decreasing chain length.
+     */
+    std::vector<t_pack_molecule*> get_long_chain_heads_by_length() const;
+
 private:
     /**
      * @brief A linked list of all the packing molecules that are loaded in

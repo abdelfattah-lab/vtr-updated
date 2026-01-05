@@ -579,6 +579,7 @@ void SetupPackerOpts(const t_options& Options,
     PackerOpts->timing_update_type = Options.timing_update_type;
     PackerOpts->pack_num_moves = Options.pack_num_moves;
     PackerOpts->pack_move_type = Options.pack_move_type;
+    PackerOpts->pack_multi_chain = Options.pack_multi_chain;
 }
 
 static void SetupNetlistOpts(const t_options& Options, t_netlist_opts& NetlistOpts) {

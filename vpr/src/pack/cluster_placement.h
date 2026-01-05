@@ -6,6 +6,7 @@
 #ifndef CLUSTER_PLACEMENT_H
 #define CLUSTER_PLACEMENT_H
 
+#include <set>
 #include <vector>
 #include <unordered_map>
 #include "physical_types.h"
@@ -19,8 +20,48 @@
 class t_intra_cluster_placement_stats {
   public:
     int num_pb_types;                     ///<num primitive pb_types inside complex block
-    bool has_long_chain;                  ///<specifies if this cluster has a molecule placed in it that belongs to a long chain (a chain that spans more than one cluster)
+
+    /// @brief Set of chain slot IDs (architectural chain indices) currently occupied by long chains.
+    ///        Replaces the old boolean has_long_chain to support multiple independent chains per CLB.
+    std::set<int> occupied_chain_slots;
+
     const t_pack_molecule* curr_molecule; ///<current molecule being considered for packing
+
+    /// @brief Check if a specific chain slot is available for packing.
+    /// @param chain_id The architectural chain slot index to check.
+    /// @return true if the slot is not occupied by another long chain.
+    bool is_chain_slot_available(int chain_id) const {
+        // chain_id == -1 means "any slot" - check if any slot might be free
+        if (chain_id < 0) return true;
+        return occupied_chain_slots.find(chain_id) == occupied_chain_slots.end();
+    }
+
+    /// @brief Check if any chain slot is available in this cluster.
+    /// @param total_chain_slots The total number of chain slots in this architecture.
+    /// @return true if at least one slot is unoccupied.
+    bool has_available_chain_slot(size_t total_chain_slots) const {
+        return occupied_chain_slots.size() < total_chain_slots;
+    }
+
+    /// @brief Mark a chain slot as occupied by a long chain.
+    /// @param chain_id The architectural chain slot index to occupy.
+    void occupy_chain_slot(int chain_id) {
+        if (chain_id >= 0) {
+            occupied_chain_slots.insert(chain_id);
+        }
+    }
+
+    /// @brief Free a chain slot (e.g., during rollback).
+    /// @param chain_id The architectural chain slot index to free.
+    void free_chain_slot(int chain_id) {
+        occupied_chain_slots.erase(chain_id);
+    }
+
+    /// @brief Legacy compatibility: check if any long chain is present.
+    /// @return true if at least one chain slot is occupied.
+    bool has_long_chain() const {
+        return !occupied_chain_slots.empty();
+    }
 
     // Vector of size num_pb_types [0.. num_pb_types-1]. Each element is an unordered_map of the cluster_placement_primitives that are of this pb_type
     // Each cluster_placement_primitive is associated with and index (key of the map) for easier lookup, insertion and deletion.

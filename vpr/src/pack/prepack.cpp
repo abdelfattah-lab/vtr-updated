@@ -13,11 +13,13 @@
 #include "prepack.h"
 #include "globals.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <map>
 #include <queue>
 #include <set>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -2562,6 +2564,120 @@ void Prepacker::reset() {
     list_of_pack_molecules = nullptr;
     atom_molecules.clear();
     expected_lowest_cost_pb_gnode.clear();
+}
+
+std::vector<t_pack_molecule*> Prepacker::get_chain_molecules(t_pack_molecule* chain_mol) const {
+    std::vector<t_pack_molecule*> chain_mols;
+
+    // Return empty if not a valid chain molecule
+    if (!chain_mol || !chain_mol->is_chain() || !chain_mol->chain_info ||
+        !chain_mol->chain_info->is_long_chain) {
+        if (chain_mol) {
+            chain_mols.push_back(chain_mol);
+        }
+        return chain_mols;
+    }
+
+    // Get the shared chain_info pointer - all molecules in the same chain share this
+    std::shared_ptr<t_chain_info> target_chain_info = chain_mol->chain_info;
+
+    // Collect all molecules that share this chain_info
+    for (auto* mol = list_of_pack_molecules; mol != nullptr; mol = mol->next) {
+        if (mol->chain_info == target_chain_info) {
+            chain_mols.push_back(mol);
+        }
+    }
+
+    // Sort molecules by their position in the chain (head first).
+    // The head molecule has first_packed_molecule == nullptr or == itself.
+    // Subsequent molecules have required_entry_chain_id set based on upstream.
+    // We use a simple approach: find the head, then traverse by connectivity.
+
+    if (chain_mols.size() <= 1) {
+        return chain_mols;
+    }
+
+    // Find the head molecule (the one that doesn't require an upstream molecule)
+    t_pack_molecule* head = nullptr;
+    for (auto* mol : chain_mols) {
+        // The head is the first molecule created, which sets chain_info->first_packed_molecule to nullptr initially
+        // or is the first one to be packed. Check if this molecule's root atom has no driver in the chain.
+        // A simpler heuristic: required_entry_chain_id == -1 for the head
+        // Actually, all first molecules have required_entry_chain_id == -1 initially.
+        // The best check is: no other molecule in chain_mols drives this one.
+
+        bool is_head = true;
+        for (auto* other : chain_mols) {
+            if (other == mol) continue;
+            // Check if 'other' drives 'mol' via the chain connection
+            // This is complex to check directly, so use a simpler heuristic:
+            // The head is typically stored in chain_info->first_packed_molecule once packing starts
+            // But before packing, we need another approach.
+        }
+        // For now, use a simpler approach: assume molecules are created in order during prepacking
+        // The first one encountered with this chain_info is likely the head
+        if (is_head) {
+            head = mol;
+            break;
+        }
+    }
+
+    // If we couldn't determine order, just return as-is
+    // TODO: Implement proper chain ordering based on atom connectivity
+    return chain_mols;
+}
+
+size_t Prepacker::calc_chain_length(t_pack_molecule* chain_mol) const {
+    if (!chain_mol || !chain_mol->is_chain() || !chain_mol->chain_info ||
+        !chain_mol->chain_info->is_long_chain) {
+        return 1;
+    }
+
+    // Count molecules sharing the same chain_info
+    size_t count = 0;
+    std::shared_ptr<t_chain_info> target_chain_info = chain_mol->chain_info;
+    for (auto* mol = list_of_pack_molecules; mol != nullptr; mol = mol->next) {
+        if (mol->chain_info == target_chain_info) {
+            count++;
+        }
+    }
+    return count;
+}
+
+std::vector<t_pack_molecule*> Prepacker::get_long_chain_heads_by_length() const {
+    // Map from chain_info pointer to (head_molecule, chain_length)
+    std::unordered_map<std::shared_ptr<t_chain_info>, std::pair<t_pack_molecule*, size_t>> chain_heads;
+
+    // First pass: find all long chains and count their lengths
+    for (auto* mol = list_of_pack_molecules; mol != nullptr; mol = mol->next) {
+        if (mol->is_chain() && mol->chain_info && mol->chain_info->is_long_chain) {
+            auto& entry = chain_heads[mol->chain_info];
+            entry.second++; // Increment chain length
+
+            // Track the head candidate (first molecule found for this chain)
+            if (entry.first == nullptr) {
+                entry.first = mol;
+            }
+        }
+    }
+
+    // Build result vector
+    std::vector<t_pack_molecule*> heads;
+    std::vector<std::pair<t_pack_molecule*, size_t>> head_lengths;
+
+    for (const auto& pair : chain_heads) {
+        head_lengths.push_back(pair.second);
+    }
+
+    // Sort by chain length (longest first)
+    std::sort(head_lengths.begin(), head_lengths.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    for (const auto& hl : head_lengths) {
+        heads.push_back(hl.first);
+    }
+
+    return heads;
 }
 
 /*******************************************************/

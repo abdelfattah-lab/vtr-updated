@@ -832,6 +832,11 @@ struct t_packer_opts {
     int pack_num_moves;
     std::string pack_move_type;
     bool load_flat_placement;
+
+    /// @brief When true, allows multiple independent long chains to be
+    ///        packed into the same sequence of CLBs if the architecture
+    ///        has multiple chain slots. Enabled by default.
+    bool pack_multi_chain;
 };
 
 /**
