@@ -907,6 +907,37 @@ void ClusteringHistoryLogger::log_routing_stats() {
     file_.flush();
 }
 
+// Helper function to collect CLB-level input pins that are filled (have routing)
+static std::vector<std::string> collect_clb_input_pins(const t_pb* cluster_pb) {
+    std::vector<std::string> filled_pins;
+    if (!cluster_pb || !cluster_pb->pb_graph_node) return filled_pins;
+
+    const t_pb_graph_node* gnode = cluster_pb->pb_graph_node;
+
+    // Iterate through all input ports and pins
+    for (int port = 0; port < gnode->num_input_ports; port++) {
+        const char* port_name = gnode->input_pins[port][0].port->name;
+        for (int pin = 0; pin < gnode->num_input_pins[port]; pin++) {
+            const t_pb_graph_pin* gpin = &gnode->input_pins[port][pin];
+            int pin_id = gpin->pin_count_in_cluster;
+            std::string pin_name = std::string(port_name) + "[" + std::to_string(pin) + "]";
+
+            // Check if this pin is used via pb_route
+            bool pin_used = false;
+            if (cluster_pb->pb_route.count(pin_id)) {
+                const auto& route = cluster_pb->pb_route.at(pin_id);
+                pin_used = route.atom_net_id.is_valid() || (route.driver_pb_pin_id != OPEN);
+            }
+
+            if (pin_used) {
+                filled_pins.push_back(pin_name);
+            }
+        }
+    }
+
+    return filled_pins;
+}
+
 // Helper function to collect atoms placed within a BLE5
 static void collect_ble5_atoms(const t_pb* pb,
                                ClusteringHistoryLogger::Ble5Utilization& ble5_util) {
@@ -1338,6 +1369,11 @@ void ClusteringHistoryLogger::record_finalized_clb(LegalizationClusterId cluster
         collect_ble5_pin_usage(cluster_pb, cluster_pb, info.fle_utilization, -1, "", nullptr);
     }
 
+    // Collect CLB-level input pins that are filled
+    if (cluster_pb) {
+        info.filled_clb_inputs = collect_clb_input_pins(cluster_pb);
+    }
+
     // Count total and used FLEs
     info.total_fles = 10;  // Could be extracted from architecture
     info.used_fles = static_cast<int>(info.fle_utilization.size());
@@ -1482,45 +1518,10 @@ void ClusteringHistoryLogger::write_summary() {
         profile_file_ << "  FLE UTILIZATION: " << clb.used_fles << " / " << clb.total_fles
               << " (" << std::fixed << std::setprecision(1) << fle_util_percent << "%)\n\n";
 
-        // FLE breakdown with BLE5 details and pin usage
-        profile_file_ << "  FLE DETAILS:\n";
-        for (const auto& [fle_idx, fle_util] : clb.fle_utilization) {
-            profile_file_ << "    FLE[" << fle_idx << "] mode=" << fle_util.fle_mode << "\n";
-
-            for (const auto& [ble5_idx, ble5_util] : fle_util.ble5_usage) {
-                profile_file_ << "      BLE5[" << ble5_idx << "] mode=" << ble5_util.ble5_mode << "\n";
-
-                // Show atoms in this BLE5 (one per line)
-                if (!ble5_util.atoms.empty()) {
-                    profile_file_ << "        Atoms:\n";
-                    for (const auto& atom : ble5_util.atoms) {
-                        profile_file_ << "          - " << atom << "\n";
-                    }
-                }
-
-                // Show BLE5-level input pin usage
-                if (!ble5_util.input_pins.empty()) {
-                    profile_file_ << "        BLE5 Pins:\n";
-                    for (const auto& [pin_name, targets] : ble5_util.input_pins) {
-                        if (targets.empty()) {
-                            profile_file_ << "          " << pin_name << " = 0\n";
-                        } else {
-                            profile_file_ << "          " << pin_name << " = 1 (";
-                            for (size_t i = 0; i < targets.size(); i++) {
-                                if (i > 0) profile_file_ << ", ";
-                                profile_file_ << targets[i];
-                            }
-                            profile_file_ << ")\n";
-                        }
-                    }
-                }
-
-                // Show full hierarchy within BLE5
-                if (!ble5_util.hierarchy.empty()) {
-                    profile_file_ << "        Hierarchy:\n";
-                    print_pb_hierarchy(profile_file_, ble5_util.hierarchy, 5);
-                }
-            }
+        // CLB input pins that are filled
+        profile_file_ << "  CLB INPUT PINS (" << clb.filled_clb_inputs.size() << " filled):\n";
+        for (const auto& pin_name : clb.filled_clb_inputs) {
+            profile_file_ << "    " << pin_name << "\n";
         }
 
         // Molecules with grouped atom placements (similar to clustering_history format)

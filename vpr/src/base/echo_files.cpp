@@ -138,6 +138,11 @@ void alloc_and_load_echo_file_info() {
     //NoC
     setEchoFileName(E_ECHO_NOC_MODEL, "noc_model.echo");
     setEchoFileName(E_ECHO_NOC_TRAFFIC_FLOWS, "noc_traffic_flows.echo");
+
+    // Disable verbose echo files that are not typically needed
+    setEchoFileEnabled(E_ECHO_CHAN_DETAILS, false);
+    setEchoFileEnabled(E_ECHO_SBLOCK_PATTERN, false);
+    setEchoFileEnabled(E_ECHO_INITIAL_PLACEMENT_TIMING_GRAPH, false);
 }
 
 void free_echo_file_info() {

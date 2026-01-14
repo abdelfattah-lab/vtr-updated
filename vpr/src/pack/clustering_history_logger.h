@@ -366,6 +366,7 @@ private:
         std::map<int, FleUtilization> fle_utilization;  ///< FLE index -> utilization info
         int total_fles = 0;
         int used_fles = 0;
+        std::vector<std::string> filled_clb_inputs;  ///< List of CLB input pin names that are filled
     };
 
     /// Storage for all finalized CLBs
